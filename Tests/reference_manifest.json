@@ -32,6 +32,30 @@
       "categories": ["mbc1", "mbc1m", "mbc2", "mbc5", "bank-lines", "ram-enable"]
     },
     {
+      "id": "mooneye-cpu-daa-31510e1",
+      "path": "Tests/Binaries/Mooneye-mts-20260714-0944-31510e1/mts-20260714-0944-31510e1/acceptance/instr/daa.gb",
+      "kind": "cpu_rom_file",
+      "expected_files": 1,
+      "expected_records": 1,
+      "categories": ["cpu", "daa", "mooneye-executed"]
+    },
+    {
+      "id": "mooneye-cpu-reg-f-31510e1",
+      "path": "Tests/Binaries/Mooneye-mts-20260714-0944-31510e1/mts-20260714-0944-31510e1/acceptance/bits/reg_f.gb",
+      "kind": "cpu_rom_file",
+      "expected_files": 1,
+      "expected_records": 1,
+      "categories": ["cpu", "flags", "mooneye-executed"]
+    },
+    {
+      "id": "mooneye-cpu-boot-regs-dmgabc-31510e1",
+      "path": "Tests/Binaries/Mooneye-mts-20260714-0944-31510e1/mts-20260714-0944-31510e1/acceptance/boot_regs-dmgABC.gb",
+      "kind": "cpu_rom_file",
+      "expected_files": 1,
+      "expected_records": 1,
+      "categories": ["cpu", "post-boot-profile", "mooneye-executed"]
+    },
+    {
       "id": "mealybug-tearoom-70e88fb",
       "path": "Tests/Binaries/Mealybug-Tearoom-70e88fb",
       "kind": "rom_tree",

@@ -7,7 +7,7 @@ const max_vector_bytes: usize = 4 * 1024 * 1024;
 // harness ceiling sits above the largest legal 8 MiB Game Boy image.
 const max_rom_bytes: usize = 16 * 1024 * 1024;
 
-const SuiteKind = enum { sm83_json, rom_tree, rom_file, cartridge_tree };
+const SuiteKind = enum { sm83_json, rom_tree, rom_file, cartridge_tree, cpu_rom_file };
 
 const Suite = struct {
     id: []const u8,
@@ -68,6 +68,7 @@ fn run(init: std.process.Init) !void {
             .rom_tree => try scanRomTree(allocator, io, cwd, suite_path),
             .rom_file => try scanRomFile(allocator, io, cwd, suite_path),
             .cartridge_tree => try scanCartridgeTree(allocator, io, cwd, suite_path),
+            .cpu_rom_file => try scanCpuRomFile(allocator, io, cwd, suite_path),
         };
         if (summary.files != suite.expected_files or summary.records != suite.expected_records) {
             std.debug.print(
@@ -100,7 +101,7 @@ fn scanVectorTree(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, roo
         defer allocator.free(path);
         const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_vector_bytes));
         defer allocator.free(bytes);
-        const validation = try core.test_vectors.validateJson(allocator, bytes);
+        const validation = try core.test_vectors.executeJson(allocator, bytes);
         result.files += 1;
         result.records += validation.vectors;
         mixDigest(&result.digest, entry.path, bytes);
@@ -154,6 +155,88 @@ fn scanRomFile(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: 
     var result = Summary{ .files = 1 };
     mixDigest(&result.digest, std.fs.path.basename(path), bytes);
     return result;
+}
+
+fn scanCpuRomFile(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) !Summary {
+    const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
+    defer allocator.free(bytes);
+    try runMooneyeCpuRom(allocator, bytes);
+    var result = Summary{ .files = 1, .records = 1 };
+    mixDigest(&result.digest, std.fs.path.basename(path), bytes);
+    return result;
+}
+
+const CpuRomBus = struct {
+    cartridge: *core.cartridge.Cartridge,
+    guest_bus: core.bus.Bus = .{},
+    video_ram: [0x2000]u8 = .{0} ** 0x2000,
+    object_attribute_memory: [0xA0]u8 = .{0} ** 0xA0,
+    io: [0x80]u8,
+    interrupt_enable: u8,
+
+    fn devices(self: *CpuRomBus) core.bus.Devices {
+        return .{
+            .cartridge = self.cartridge,
+            .video_ram = &self.video_ram,
+            .object_attribute_memory = &self.object_attribute_memory,
+            .io = &self.io,
+            .interrupt_enable = &self.interrupt_enable,
+        };
+    }
+
+    fn read(context: *anyopaque, address: u16) u8 {
+        const self: *CpuRomBus = @ptrCast(@alignCast(context));
+        const view = self.devices();
+        return self.guest_bus.read(view, address);
+    }
+
+    fn write(context: *anyopaque, address: u16, value: u8) void {
+        const self: *CpuRomBus = @ptrCast(@alignCast(context));
+        const view = self.devices();
+        self.guest_bus.write(view, address, value);
+    }
+
+    fn idle(_: *anyopaque, _: u16, _: u8) void {}
+
+    fn cpuBus(self: *CpuRomBus) core.cpu.Bus {
+        return .{ .context = self, .read_fn = read, .write_fn = write, .idle_fn = idle };
+    }
+};
+
+fn runMooneyeCpuRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
+    var cartridge = try core.cartridge.Cartridge.init(allocator, bytes);
+    defer cartridge.deinit();
+    const profile = core.model.profile(.dmg_c);
+    var memory = CpuRomBus{
+        .cartridge = &cartridge,
+        .io = profile.mmio,
+        .interrupt_enable = profile.ie,
+    };
+    // The selected CPU-only probes deliberately take Mooneye's documented
+    // no-PPU fast path; no PPU result is inferred in this subversion.
+    memory.io[0x44] = 0xFF;
+    var processor = core.cpu.Cpu.init(profile);
+    const instruction_budget: usize = 20_000_000;
+    var instructions: usize = 0;
+    while (instructions < instruction_budget) : (instructions += 1) {
+        if (processor.registers.b == 3 and processor.registers.c == 5 and
+            processor.registers.d == 8 and processor.registers.e == 13 and
+            processor.registers.h == 21 and processor.registers.l == 34)
+        {
+            return;
+        }
+        if (processor.registers.b == 0x42 and processor.registers.c == 0x42 and
+            processor.registers.d == 0x42 and processor.registers.e == 0x42 and
+            processor.registers.h == 0x42 and processor.registers.l == 0x42)
+        {
+            return error.MooneyeCpuFailure;
+        }
+        const execution = processor.step(memory.cpuBus(), 0);
+        if (execution.kind == .illegal or execution.kind == .halted or execution.kind == .stopped) {
+            return error.MooneyeCpuUnexpectedState;
+        }
+    }
+    return error.MooneyeCpuTimeout;
 }
 
 fn validateRomIdentity(bytes: []const u8) !void {

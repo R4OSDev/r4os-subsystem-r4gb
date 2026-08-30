@@ -27,6 +27,27 @@ const error_cartridge: i32 = 71;
 const error_not_implemented: i32 = 72;
 const error_allocator: i32 = 73;
 
+const CpuSelfTestMemory = struct {
+    bytes: [3]u8 = .{ 0x3E, 0x42, 0x00 },
+
+    fn read(context: *anyopaque, address: u16) u8 {
+        const self: *CpuSelfTestMemory = @ptrCast(@alignCast(context));
+        if (address < 0x0100 or address >= 0x0100 + self.bytes.len) return 0xFF;
+        return self.bytes[@as(usize, address) - 0x0100];
+    }
+
+    fn write(_: *anyopaque, _: u16, _: u8) void {}
+    fn idle(_: *anyopaque, _: u16, _: u8) void {}
+
+    fn bus(self: *CpuSelfTestMemory) core.cpu.Bus {
+        return .{ .context = self, .read_fn = read, .write_fn = write, .idle_fn = idle };
+    }
+};
+
+noinline fn executeCpuProbe(processor: *core.cpu.Cpu, memory: *CpuSelfTestMemory) core.cpu.StepResult {
+    return processor.step(memory.bus(), 0);
+}
+
 pub fn r4_app_main(app: *r4os.App) i32 {
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
     if (app.profile != .desktop) return error_profile;
@@ -130,8 +151,15 @@ fn selfTest(app: *r4os.App) i32 {
         sys.println("R4GB cartridge selftest FAILED: cartridge");
         return 90;
     };
+    var cpu_profile = core.model.profile(.dmg_c);
+    cpu_profile.registers.pc = 0x0100;
+    var processor = core.cpu.Cpu.init(cpu_profile);
+    var cpu_memory: CpuSelfTestMemory = .{};
+    const cpu_result = executeCpuProbe(&processor, &cpu_memory);
     if (!std.mem.eql(u8, header.titleSlice(), "R4TEST") or
         core.model.production_revision != .dmg_c or
+        cpu_result.kind != .instruction or cpu_result.m_cycles != 2 or
+        processor.registers.a != 0x42 or processor.registers.pc != 0x0102 or
         core.host_adapter.buttonForPhysicalUsage(core.host_adapter.physical_usage_right_control) != .select)
     {
         sys.println("R4GB cartridge selftest FAILED: model");
@@ -148,7 +176,7 @@ fn selfTest(app: *r4os.App) i32 {
     bytes[0x14F] = @truncate(global);
     _ = core.cartridge.parse(bytes) catch |fault| {
         if (fault == error.CgbOnly) {
-            sys.println("R4GB cartridge selftest: OK model=dmg-c mapper=rom-only bus=bounded input=physical");
+            sys.println("R4GB CPU selftest: OK model=dmg-c mapper=rom-only bus=bounded sm83=cycle-callback input=physical");
             return 0;
         }
         sys.println("R4GB cartridge selftest FAILED: CGB rejection");

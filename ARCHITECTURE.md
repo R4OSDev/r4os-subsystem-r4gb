@@ -60,6 +60,21 @@ DMG unusable-area values, VRAM/OAM mode gates, and DMA CPU exclusion are
 handled before indexing device storage. A guest address is never widened into
 an unchecked host address.
 
+## CPU execution boundary
+
+The SM83 decoder is complete for all 244 legal non-prefix base opcodes and all
+256 CB operations. One `Cpu.step` executes either one instruction, one
+interrupt entry, or one bounded halted/stopped/locked cycle. Every memory read,
+memory write, and internal M-cycle crosses a caller-owned callback interface;
+the CPU never owns or bypasses guest memory. The callback order therefore
+preserves conditional timing, stack byte order, and read-modify-write points
+for timer, DMA, PPU, and interrupt integration.
+
+Flags are masked to their four physical upper bits at the CPU boundary. IME,
+delayed EI, DI, RETI, HALT, the HALT bug, STOP, interrupt vectors, and the
+documented illegal-opcode lock are explicit instance fields. No decode table,
+scratch register, or pending transition is shared between machines.
+
 ## Test boundary
 
 Small original fixtures live in this repository. Large JSON vectors and open

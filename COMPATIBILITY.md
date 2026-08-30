@@ -32,3 +32,15 @@
 All accepted images must match their declared complete ROM length, mapper
 limits, RAM declaration, Nintendo logo, header checksum, and global checksum.
 ROM data is copied into instance-owned immutable storage before use.
+
+## CPU
+
+- All 244 legal base paths and all 256 CB-prefixed operations are implemented.
+- Register, flag, RAM, PC, SP, IME and M-cycle bus results match all 500,000
+  pinned SM83 SingleStep cases.
+- Mooneye `daa`, `bits/reg_f`, and `boot_regs-dmgABC` execute to their success
+  signatures through the production CPU and bus. Timing-, interrupt-, DMA-,
+  PPU- and timer-dependent Mooneye probes remain assigned to later hardware
+  stages.
+- Illegal opcodes lock only the guest CPU; they cannot escape the guest budget
+  or cause a host memory access.

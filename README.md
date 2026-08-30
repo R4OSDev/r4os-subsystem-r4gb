@@ -12,11 +12,13 @@ host establishes a documented post-boot state and starts a cartridge at
 cartridge header validation decides whether a file can run in DMG mode.
 CGB-only cartridges are rejected.
 
-Version 0.2 provides the complete bounded cartridge front end and DMG address
-bus. It validates both header and global checksums, creates an owned immutable
-ROM image, models cartridge RAM/RTC register windows, and implements ROM-only,
-MBC1/MBC1M, MBC2, MBC3/MBC30, and MBC5 banking. Known unsupported mapper and
-physical-accessory cartridge types fail with separate classifications.
+Version 0.3 provides the complete bounded cartridge front end, DMG address
+bus, and SM83 instruction core. It validates both header and global checksums,
+creates an owned immutable ROM image, models cartridge RAM/RTC register
+windows, and implements ROM-only, MBC1/MBC1M, MBC2, MBC3/MBC30, and MBC5
+banking. Every legal base and CB opcode runs through explicit read, write, and
+idle M-cycle callbacks; illegal opcodes enter a bounded lock state. Known
+unsupported mapper and physical-accessory cartridge types fail separately.
 
 Build on Linux with `./Build.sh test` and on Windows with `Build.bat test`.
 `reference-test` additionally validates a local, optional reference tree; use

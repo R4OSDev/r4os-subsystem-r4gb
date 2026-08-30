@@ -18,6 +18,185 @@ test "DMG revision profiles and side-specific keyboard mapping are explicit" {
     try std.testing.expectEqual(core.joypad.Button.b, core.host_adapter.buttonForPhysicalUsage(core.host_adapter.physical_usage_left_alt).?);
 }
 
+const CpuEvent = struct {
+    address: u16,
+    value: u8,
+    kind: core.cpu.CycleKind,
+};
+
+const CpuMemory = struct {
+    bytes: [65536]u8 = .{0} ** 65536,
+    events: [32]CpuEvent = undefined,
+    event_count: usize = 0,
+
+    fn read(context: *anyopaque, address: u16) u8 {
+        const self: *CpuMemory = @ptrCast(@alignCast(context));
+        const value = self.bytes[address];
+        self.append(address, value, .read);
+        return value;
+    }
+
+    fn write(context: *anyopaque, address: u16, value: u8) void {
+        const self: *CpuMemory = @ptrCast(@alignCast(context));
+        self.bytes[address] = value;
+        self.append(address, value, .write);
+    }
+
+    fn idle(context: *anyopaque, address: u16, value: u8) void {
+        const self: *CpuMemory = @ptrCast(@alignCast(context));
+        self.append(address, value, .idle);
+    }
+
+    fn append(self: *CpuMemory, address: u16, value: u8, kind: core.cpu.CycleKind) void {
+        self.events[self.event_count] = .{ .address = address, .value = value, .kind = kind };
+        self.event_count += 1;
+    }
+
+    fn bus(self: *CpuMemory) core.cpu.Bus {
+        return .{ .context = self, .read_fn = read, .write_fn = write, .idle_fn = idle };
+    }
+};
+
+fn testCpu(pc: u16, sp: u16) core.cpu.Cpu {
+    var profile = core.model.profile(.dmg_c);
+    profile.registers = .{ .a = 0, .f = 0, .b = 0, .c = 0, .d = 0, .e = 0, .h = 0, .l = 0, .sp = sp, .pc = pc };
+    return core.cpu.Cpu.init(profile);
+}
+
+test "illegal SM83 opcodes enter a bounded lock state and F low bits stay fixed" {
+    const illegal = [_]u8{ 0xD3, 0xDB, 0xDD, 0xE3, 0xE4, 0xEB, 0xEC, 0xED, 0xF4, 0xFC, 0xFD };
+    var legal_count: usize = 0;
+    var raw: u16 = 0;
+    while (raw <= 0xFF) : (raw += 1) {
+        if (!core.cpu.isIllegalBaseOpcode(@intCast(raw))) legal_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 245), legal_count);
+    for (illegal) |opcode| {
+        var memory: CpuMemory = .{};
+        memory.bytes[0x100] = opcode;
+        var processor = testCpu(0x100, 0xFFFE);
+        processor.registers.f = 0xBF;
+        const first = processor.step(memory.bus(), 0);
+        try std.testing.expectEqual(core.cpu.ExecutionKind.illegal, first.kind);
+        try std.testing.expect(processor.locked);
+        try std.testing.expectEqual(@as(u8, 0xB0), processor.registers.f);
+        const second = processor.step(memory.bus(), 0);
+        try std.testing.expectEqual(core.cpu.ExecutionKind.illegal, second.kind);
+        try std.testing.expectEqual(@as(u8, 1), second.m_cycles);
+    }
+}
+
+test "EI delay, DI cancellation and RETI are explicit instruction states" {
+    var memory: CpuMemory = .{};
+    memory.bytes[0x100] = 0xFB;
+    memory.bytes[0x101] = 0x00;
+    var processor = testCpu(0x100, 0xC000);
+    _ = processor.step(memory.bus(), 0);
+    try std.testing.expect(!processor.ime);
+    try std.testing.expect(processor.ime_enable_pending);
+    _ = processor.step(memory.bus(), 0);
+    try std.testing.expect(processor.ime);
+    try std.testing.expect(!processor.ime_enable_pending);
+
+    memory = .{};
+    memory.bytes[0x100] = 0xFB;
+    memory.bytes[0x101] = 0xF3;
+    processor = testCpu(0x100, 0xC000);
+    _ = processor.step(memory.bus(), 0);
+    _ = processor.step(memory.bus(), 0);
+    try std.testing.expect(!processor.ime);
+    try std.testing.expect(!processor.ime_enable_pending);
+
+    memory = .{};
+    memory.bytes[0x100] = 0xD9;
+    memory.bytes[0xC000] = 0x34;
+    memory.bytes[0xC001] = 0x12;
+    processor = testCpu(0x100, 0xC000);
+    _ = processor.step(memory.bus(), 0);
+    try std.testing.expect(processor.ime);
+    try std.testing.expectEqual(@as(u16, 0x1234), processor.registers.pc);
+    try std.testing.expectEqual(@as(u16, 0xC002), processor.registers.sp);
+}
+
+test "HALT bug, STOP wake and interrupt stack order are deterministic" {
+    var memory: CpuMemory = .{};
+    memory.bytes[0x100] = 0x76;
+    memory.bytes[0x101] = 0x3E;
+    memory.bytes[0x102] = 0x42;
+    var processor = testCpu(0x100, 0xC000);
+    _ = processor.step(memory.bus(), 1);
+    try std.testing.expect(processor.halt_bug);
+    try std.testing.expect(!processor.halted);
+    _ = processor.step(memory.bus(), 0);
+    try std.testing.expectEqual(@as(u8, 0x3E), processor.registers.a);
+    try std.testing.expectEqual(@as(u16, 0x102), processor.registers.pc);
+
+    memory = .{};
+    memory.bytes[0x200] = 0x10;
+    memory.bytes[0x201] = 0x00;
+    processor = testCpu(0x200, 0xC000);
+    _ = processor.step(memory.bus(), 0);
+    try std.testing.expect(processor.stopped);
+    const stopped = processor.step(memory.bus(), 0);
+    try std.testing.expectEqual(core.cpu.ExecutionKind.stopped, stopped.kind);
+    _ = processor.step(memory.bus(), 1);
+    try std.testing.expect(!processor.stopped);
+
+    memory = .{};
+    processor = testCpu(0x1234, 0xC000);
+    processor.ime = true;
+    const accepted = processor.step(memory.bus(), 0x04);
+    try std.testing.expectEqual(core.cpu.ExecutionKind.interrupt, accepted.kind);
+    try std.testing.expectEqual(@as(?u3, 2), accepted.interrupt_bit);
+    try std.testing.expectEqual(@as(u16, 0x0050), processor.registers.pc);
+    try std.testing.expectEqual(@as(u16, 0xBFFE), processor.registers.sp);
+    try std.testing.expectEqual(@as(u8, 0x12), memory.bytes[0xBFFF]);
+    try std.testing.expectEqual(@as(u8, 0x34), memory.bytes[0xBFFE]);
+    try std.testing.expectEqual(@as(usize, 5), memory.event_count);
+    try std.testing.expectEqual(core.cpu.CycleKind.write, memory.events[2].kind);
+    try std.testing.expectEqual(@as(u16, 0xBFFF), memory.events[2].address);
+    try std.testing.expectEqual(core.cpu.CycleKind.write, memory.events[3].kind);
+    try std.testing.expectEqual(@as(u16, 0xBFFE), memory.events[3].address);
+}
+
+test "DAA and signed SP offsets cover carry boundaries" {
+    var memory: CpuMemory = .{};
+    memory.bytes[0x100] = 0x27;
+    var processor = testCpu(0x100, 0xC000);
+    processor.registers.a = 0x9A;
+    _ = processor.step(memory.bus(), 0);
+    try std.testing.expectEqual(@as(u8, 0), processor.registers.a);
+    try std.testing.expectEqual(@as(u8, core.cpu.flag_z | core.cpu.flag_c), processor.registers.f);
+
+    memory = .{};
+    memory.bytes[0x100] = 0xE8;
+    memory.bytes[0x101] = 0xFF;
+    processor = testCpu(0x100, 0x0001);
+    _ = processor.step(memory.bus(), 0);
+    try std.testing.expectEqual(@as(u16, 0), processor.registers.sp);
+    try std.testing.expectEqual(@as(u8, core.cpu.flag_h | core.cpu.flag_c), processor.registers.f);
+}
+
+test "identical CPU instances share no registers, RAM or decode state" {
+    var left_memory: CpuMemory = .{};
+    var right_memory: CpuMemory = .{};
+    const program = [_]u8{ 0xCD, 0x78, 0x56 };
+    @memcpy(left_memory.bytes[0x100..0x103], program[0..]);
+    @memcpy(right_memory.bytes[0x100..0x103], program[0..]);
+    var left = testCpu(0x100, 0xC000);
+    var right = testCpu(0x100, 0xC000);
+    const left_result = left.step(left_memory.bus(), 0);
+    const right_result = right.step(right_memory.bus(), 0);
+    try std.testing.expect(std.meta.eql(left, right));
+    try std.testing.expect(std.meta.eql(left_result, right_result));
+    try std.testing.expectEqualSlices(CpuEvent, left_memory.events[0..left_memory.event_count], right_memory.events[0..right_memory.event_count]);
+    try std.testing.expectEqualSlices(u8, left_memory.bytes[0xBFFE..0xC000], right_memory.bytes[0xBFFE..0xC000]);
+    left.registers.a = 0xAA;
+    left_memory.bytes[0xBFFE] ^= 0xFF;
+    try std.testing.expect(left.registers.a != right.registers.a);
+    try std.testing.expect(left_memory.bytes[0xBFFE] != right_memory.bytes[0xBFFE]);
+}
+
 fn makeRom(allocator: std.mem.Allocator, type_code: u8, rom_code: u8, ram_code: u8, cgb_flag: u8) ![]u8 {
     const size = core.cartridge.romBytes(rom_code) orelse return error.BadFixtureRomSize;
     const bytes = try allocator.alloc(u8, size);
