@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "suites": [
+    {
+      "id": "sm83-single-step-v1",
+      "path": "Tests/SM83-SingleStep/v1",
+      "kind": "sm83_json",
+      "expected_files": 500,
+      "expected_records": 500000,
+      "categories": ["cpu", "m-cycle-bus"]
+    },
+    {
+      "id": "mooneye-31510e1",
+      "path": "Tests/Binaries/Mooneye-mts-20260714-0944-31510e1",
+      "kind": "rom_tree",
+      "expected_files": 115,
+      "categories": ["cpu", "timer", "interrupt", "dma", "memory", "mapper"]
+    },
+    {
+      "id": "dmg-acid2-v1.0",
+      "path": "Tests/Binaries/dmg-acid2-v1.0.gb",
+      "kind": "rom_file",
+      "expected_files": 1,
+      "categories": ["ppu"]
+    },
+    {
+      "id": "mealybug-tearoom-70e88fb",
+      "path": "Tests/Binaries/Mealybug-Tearoom-70e88fb",
+      "kind": "rom_tree",
+      "expected_files": 31,
+      "categories": ["ppu", "timer", "mbc3-rtc"]
+    },
+    {
+      "id": "samesuite-f15645f",
+      "path": "Tests/Binaries/Generated/SameSuite-f15645f",
+      "kind": "rom_tree",
+      "expected_files": 78,
+      "categories": ["apu", "interrupt", "dma", "ppu"]
+    },
+    {
+      "id": "rtc3test-v004",
+      "path": "Tests/Binaries/rtc3test-v004.gb",
+      "kind": "rom_file",
+      "expected_files": 1,
+      "categories": ["mapper", "mbc3-rtc"]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+# R4GB repository path mappings. Relative paths start at this repository.
+SDK_ROOT=../../SDK
+CONTRACT_ROOT=../../Contract
+DEVKIT_ROOT=../../../DevKit
+ARTIFACTS_ROOT=../../../Artifacts/Modules/R4GB
+ZIG_ROOT=Toolchains/Zig

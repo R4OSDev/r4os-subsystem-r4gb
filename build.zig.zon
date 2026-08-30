@@ -1,0 +1,32 @@
+.{
+    .name = .r4os_r4gb,
+    .version = "0.1.0",
+    .fingerprint = 0x1884614c9bbb2524,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .r4os_sdk = .{
+            .url = "https://github.com/R4OSDev/r4os-sdk/archive/418f49a795bcff0177fa622dddab57262bf503ed.tar.gz",
+            .hash = "r4os_sdk-0.64.17-NnPzAkJv7gBwJAoIcSZyXzHimQXv3t6e-4EyuzU2ZoAn",
+        },
+    },
+    .paths = .{
+        ".gitattributes",
+        ".gitignore",
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "ARCHITECTURE.md",
+        "COMPATIBILITY.md",
+        "THIRD_PARTY_NOTICES.md",
+        "PROVENANCE.txt",
+        "Build.bat",
+        "Build.ps1",
+        "Build.sh",
+        "Settings.R4S",
+        "build.zig",
+        "build.zig.zon",
+        "module.R4MF",
+        "src",
+        "Tests",
+    },
+}

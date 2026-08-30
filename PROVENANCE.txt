@@ -1,0 +1,11 @@
+R4GB is an original Zig implementation for R4OS.
+
+Design references are consulted in this order:
+1. Results measured on original DMG hardware.
+2. Pinned GB-CTR and Pan Docs snapshots.
+3. Independently implemented high-accuracy emulators for comparison.
+4. Generated vectors only as supplementary evidence.
+
+No leaked Nintendo documentation, Nintendo boot ROM, or commercial game ROM
+is used as a distributable dependency. The public repository contains only
+original R4OS source and small original unit-test fixtures.
