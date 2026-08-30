@@ -7,7 +7,7 @@ const max_vector_bytes: usize = 4 * 1024 * 1024;
 // harness ceiling sits above the largest legal 8 MiB Game Boy image.
 const max_rom_bytes: usize = 16 * 1024 * 1024;
 
-const SuiteKind = enum { sm83_json, rom_tree, rom_file };
+const SuiteKind = enum { sm83_json, rom_tree, rom_file, cartridge_tree };
 
 const Suite = struct {
     id: []const u8,
@@ -67,6 +67,7 @@ fn run(init: std.process.Init) !void {
             .sm83_json => try scanVectorTree(allocator, io, cwd, suite_path),
             .rom_tree => try scanRomTree(allocator, io, cwd, suite_path),
             .rom_file => try scanRomFile(allocator, io, cwd, suite_path),
+            .cartridge_tree => try scanCartridgeTree(allocator, io, cwd, suite_path),
         };
         if (summary.files != suite.expected_files or summary.records != suite.expected_records) {
             std.debug.print(
@@ -121,6 +122,26 @@ fn scanRomTree(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, root: 
         defer allocator.free(bytes);
         try validateRomIdentity(bytes);
         result.files += 1;
+        mixDigest(&result.digest, entry.path, bytes);
+    }
+    return result;
+}
+
+fn scanCartridgeTree(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, root: []const u8) !Summary {
+    var dir = try cwd.openDir(io, root, .{ .iterate = true });
+    defer dir.close(io);
+    var walker = try dir.walk(allocator);
+    defer walker.deinit();
+    var result = Summary{};
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file or !std.ascii.endsWithIgnoreCase(entry.path, ".gb")) continue;
+        const path = try std.fs.path.join(allocator, &.{ root, entry.path });
+        defer allocator.free(path);
+        const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
+        defer allocator.free(bytes);
+        _ = try core.cartridge.parse(bytes);
+        result.files += 1;
+        result.records += 1;
         mixDigest(&result.digest, entry.path, bytes);
     }
     return result;

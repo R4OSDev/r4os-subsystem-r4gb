@@ -1,4 +1,4 @@
-# Architecture and ownership
+﻿# Architecture and ownership
 
 Every emulated Game Boy is one `Machine` value. All mutable state is owned by
 that instance; there are no process-global CPU, bus, cartridge, clock, audio,
@@ -42,10 +42,23 @@ values. Revision identity is immutable after machine construction.
 
 Cartridge discovery is intentionally broader than execution. The host first
 checks file bounds, Nintendo-logo bytes, header checksum, declared ROM size,
-and CGB capability. A `.gbc` filename does not imply CGB-only hardware, and a
+global checksum, mapper/RAM consistency, and CGB capability. A `.gbc` filename
+does not imply CGB-only hardware, and a
 `.gb` filename cannot bypass a CGB-only header. Unsupported mappers and pure
 CGB images fail before a machine is created. The input ROM buffer is never
 modified.
+
+The cartridge owns its complete ROM allocation as a read-only slice. Mapper
+register writes can only select bounded ROM, SRAM, nibble RAM, or RTC register
+indices. Physically absent banks read as `0xFF`; missing power-of-two address
+lines mirror existing storage. MBC1M is selected only after a valid embedded
+bank-`0x10` header is found. MBC5 rumble state is recorded separately and can
+never become a RAM-bank bit.
+
+The bus classifies every `u16` address into exactly one DMG region. WRAM echo,
+DMG unusable-area values, VRAM/OAM mode gates, and DMA CPU exclusion are
+handled before indexing device storage. A guest address is never widened into
+an unchecked host address.
 
 ## Test boundary
 

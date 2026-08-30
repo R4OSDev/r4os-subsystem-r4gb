@@ -1,3 +1,5 @@
+const cartridge = @import("cartridge.zig");
+
 pub const Region = enum {
     cartridge_rom,
     video_ram,
@@ -26,10 +28,60 @@ pub fn classify(address: u16) Region {
     };
 }
 
+/// Addressable storage owned by the corresponding guest devices. The bus
+/// receives these references only for the duration of one access; it never
+/// stores or exposes host pointers to the emulated CPU.
+pub const Devices = struct {
+    cartridge: *cartridge.Cartridge,
+    video_ram: *[0x2000]u8,
+    object_attribute_memory: *[0xA0]u8,
+    io: *[0x80]u8,
+    interrupt_enable: *u8,
+    vram_blocked: bool = false,
+    oam_blocked: bool = false,
+    dma_blocks_external_bus: bool = false,
+};
+
 pub const Bus = struct {
     work_ram: [0x2000]u8 = .{0} ** 0x2000,
     high_ram: [0x7F]u8 = .{0} ** 0x7F,
     open_bus: u8 = 0xFF,
+
+    pub fn read(self: *Bus, devices: Devices, address: u16) u8 {
+        if (devices.dma_blocks_external_bus and address < 0xFF80) return self.open_bus;
+        return switch (classify(address)) {
+            .cartridge_rom => devices.cartridge.readRom(address),
+            .video_ram => if (devices.vram_blocked) self.open_bus else devices.video_ram[@as(usize, address) - 0x8000],
+            .cartridge_ram => devices.cartridge.readExternal(address),
+            .work_ram => self.work_ram[@as(usize, address) - 0xC000],
+            .echo_ram => self.work_ram[@as(usize, address) - 0xE000],
+            .object_attribute_memory => if (devices.oam_blocked) self.open_bus else devices.object_attribute_memory[@as(usize, address) - 0xFE00],
+            .unusable => if (devices.oam_blocked) self.open_bus else 0x00,
+            .io => devices.io[@as(usize, address) - 0xFF00],
+            .high_ram => self.high_ram[@as(usize, address) - 0xFF80],
+            .interrupt_enable => devices.interrupt_enable.*,
+        };
+    }
+
+    pub fn write(self: *Bus, devices: Devices, address: u16, value: u8) void {
+        if (devices.dma_blocks_external_bus and address < 0xFF80) return;
+        switch (classify(address)) {
+            .cartridge_rom => devices.cartridge.writeControl(address, value),
+            .video_ram => if (!devices.vram_blocked) {
+                devices.video_ram[@as(usize, address) - 0x8000] = value;
+            },
+            .cartridge_ram => devices.cartridge.writeExternal(address, value),
+            .work_ram => self.work_ram[@as(usize, address) - 0xC000] = value,
+            .echo_ram => self.work_ram[@as(usize, address) - 0xE000] = value,
+            .object_attribute_memory => if (!devices.oam_blocked) {
+                devices.object_attribute_memory[@as(usize, address) - 0xFE00] = value;
+            },
+            .unusable => {},
+            .io => devices.io[@as(usize, address) - 0xFF00] = value,
+            .high_ram => self.high_ram[@as(usize, address) - 0xFF80] = value,
+            .interrupt_enable => devices.interrupt_enable.* = value,
+        }
+    }
 };
 
 test "all guest addresses resolve as integers into one DMG region" {
