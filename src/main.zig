@@ -2,6 +2,20 @@ const std = @import("std");
 const r4os = @import("r4os");
 const core = @import("core.zig");
 
+comptime {
+    if (core.host_adapter.physical_usage_up != r4os.abi.physical_key_usage_up or
+        core.host_adapter.physical_usage_down != r4os.abi.physical_key_usage_down or
+        core.host_adapter.physical_usage_left != r4os.abi.physical_key_usage_left or
+        core.host_adapter.physical_usage_right != r4os.abi.physical_key_usage_right or
+        core.host_adapter.physical_usage_enter != r4os.abi.physical_key_usage_enter or
+        core.host_adapter.physical_usage_right_control != r4os.abi.physical_key_usage_right_control or
+        core.host_adapter.physical_usage_left_alt != r4os.abi.physical_key_usage_left_alt or
+        core.host_adapter.physical_usage_space != r4os.abi.physical_key_usage_space)
+    {
+        @compileError("R4GB physical input mapping drifted from the public R4DESK HID contract");
+    }
+}
+
 const error_profile: i32 = 64;
 const error_launch: i32 = 65;
 const error_path: i32 = 66;
