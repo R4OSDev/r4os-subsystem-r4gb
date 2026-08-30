@@ -5,12 +5,14 @@ pub fn build(b: *std.Build) void {
     const sdk_dep = b.dependencyFromBuildZig(sdk_build, .{});
     const sdk = sdk_build.sdk(b, sdk_dep, .{});
     _ = sdk.addR4MF(b.path("module.R4MF"));
+    const host_r4os = sdk.createR4osModule(b.graph.host, .Debug);
 
     const core = b.createModule(.{
         .root_source_file = b.path("src/core.zig"),
         .target = b.graph.host,
         .optimize = .Debug,
     });
+    core.addImport("r4os", host_r4os);
     const unit_root = b.createModule(.{
         .root_source_file = b.path("Tests/unit_test.zig"),
         .target = b.graph.host,
@@ -19,6 +21,16 @@ pub fn build(b: *std.Build) void {
     unit_root.addImport("core", core);
     const unit_tests = b.addTest(.{ .root_module = unit_root });
     const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    const video_host_root = b.createModule(.{
+        .root_source_file = b.path("Tests/video_host_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    video_host_root.addImport("core", core);
+    video_host_root.addImport("r4os", host_r4os);
+    const video_host_tests = b.addTest(.{ .root_module = video_host_root });
+    const run_video_host_tests = b.addRunArtifact(video_host_tests);
 
     const reference_root = b.createModule(.{
         .root_source_file = b.path("Tests/reference_harness.zig"),
@@ -30,7 +42,12 @@ pub fn build(b: *std.Build) void {
     const run_references = b.addRunArtifact(reference_harness);
     run_references.setCwd(b.path("."));
     run_references.addArg(b.option([]const u8, "gb-reference-root", "Game Boy reference root; absent material is skipped") orelse "../../../ExFiles/Reference/GameBoy");
-    if (b.option([]const u8, "gb-reference-suite", "Run only one reference suite by manifest id")) |suite| run_references.addArg(suite);
+    const reference_suite = b.option([]const u8, "gb-reference-suite", "Run only one reference suite by manifest id");
+    if (reference_suite) |suite| run_references.addArg(suite);
+    if (b.option([]const u8, "gb-reference-case", "Run one path from a machine ROM selection")) |case_path| {
+        if (reference_suite == null) run_references.addArg("");
+        run_references.addArg(case_path);
+    }
 
     const cartridge_probe_root = b.createModule(.{
         .root_source_file = b.path("Tests/cartridge_probe.zig"),
@@ -45,6 +62,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Build R4GB and run deterministic owner tests");
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_video_host_tests.step);
 
     const reference_step = b.step("reference-test", "Validate all available pinned SM83 vectors and open ROM fixtures");
     reference_step.dependOn(&run_references.step);

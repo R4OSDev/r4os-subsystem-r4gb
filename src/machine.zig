@@ -31,7 +31,7 @@ pub const Machine = struct {
 
     pub fn init(revision: model.Revision, cart: cartridge.Cartridge) Machine {
         const boot = model.profile(revision);
-        return .{
+        var result = Machine{
             .revision = revision,
             .cartridge = cart,
             .io = boot.mmio,
@@ -55,6 +55,9 @@ pub const Machine = struct {
                 .wx = boot.mmio[0x4B],
             },
         };
+        result.ppu.initializeDmgBootVram(&cartridge.logo);
+        result.ppu.synchronizeAfterBoot(revision);
+        return result;
     }
 
     pub fn deinit(self: *Machine) void {
@@ -77,9 +80,23 @@ pub const Machine = struct {
     /// can use the same owned storage without recursively blocking itself.
     pub fn read(self: *Machine, address: u16) u8 {
         if (address == 0xFF46) return self.dma.source_high;
-        if (self.dma.active and address < 0xFF80) return self.bus.open_bus;
-        if (address == 0xFFFF) return if (self.dma.active) self.bus.open_bus else self.interrupts.enable;
-        if (address >= 0xFF00 and address <= 0xFF7F) return self.readIo(@truncate(address));
+        if (self.dmaContendsWith(address)) {
+            // At the final two DMA bytes, an M1 fetch at $FDFF is already
+            // driven by the CPU bus while the following $FE00 data read still
+            // observes DMA contention. Mooneye uses this documented boundary
+            // to distinguish adjacent SM83 M-cycles.
+            if (address < 0xFDFE or address > 0xFDFF) return self.bus.open_bus;
+            const bytes_before_oam: u8 = @intCast(0xFE00 - address);
+            const first_visible_index: u8 = 0x9F - bytes_before_oam;
+            if (self.dma.byte_index < first_visible_index) return self.bus.open_bus;
+        }
+        if (address == 0xFFFF) return self.interrupts.enable;
+        if (address >= 0xFF00 and address <= 0xFF7F) {
+            return self.readIo(@truncate(address));
+        }
+        if (address >= 0xFE00 and address <= 0xFEFF and self.ppu.mode() == .oam) {
+            self.ppu.corruptOam(.read);
+        }
         const view = self.devices();
         return self.bus.read(view, address);
     }
@@ -89,16 +106,21 @@ pub const Machine = struct {
             self.writeIo(0x46, value);
             return;
         }
-        if (self.dma.active and address < 0xFF80) return;
+        if (self.dmaContendsWith(address)) return;
         if (address == 0xFFFF) {
-            if (!self.dma.active) self.interrupts.enable = value;
+            self.interrupts.enable = value;
             return;
         }
         if (address >= 0xFF00 and address <= 0xFF7F) {
             self.writeIo(@truncate(address), value);
             return;
         }
-        const view = self.devices();
+        if (address >= 0xFE00 and address <= 0xFEFF and self.ppu.mode() == .oam) {
+            self.ppu.corruptOam(.write);
+        }
+        var view = self.devices();
+        view.vram_blocked = self.ppu.cpuVramWriteBlocked();
+        view.oam_blocked = self.dma.active or self.ppu.cpuOamWriteBlocked();
         self.bus.write(view, address, value);
     }
 
@@ -106,6 +128,7 @@ pub const Machine = struct {
         return .{
             .context = self,
             .read_fn = cpuRead,
+            .opcode_read_fn = cpuOpcodeRead,
             .write_fn = cpuWrite,
             .idle_fn = cpuIdle,
             .pending_interrupts_fn = cpuPendingInterrupts,
@@ -156,8 +179,8 @@ pub const Machine = struct {
     }
 
     fn tickOne(self: *Machine) void {
-        // Stable device order: timer/system divider, DMA, serial. PPU and APU
-        // join this sequence in their owner subversions without host-time input.
+        // Stable device order: timer/system divider, DMA, PPU, serial. Every
+        // device consumes the same guest T-cycle and no host clock leaks here.
         const old_divider = self.timer.divider_counter;
         if (!self.cpu.stopped and self.timer.tick()) self.interrupts.requestBit(2);
 
@@ -166,6 +189,11 @@ pub const Machine = struct {
                 const destination: usize = @as(u8, @truncate(source));
                 if (destination < self.ppu.oam.len) self.ppu.oam[destination] = self.readDmaSource(source);
             }
+        }
+
+        if (!self.cpu.stopped) {
+            self.applyPpuEvents(self.ppu.tick());
+            if (!self.cpu.halted and self.ppu.sampleRunningMode2Edge()) self.interrupts.requestBit(1);
         }
 
         if (!self.cpu.stopped and self.serial.tick(old_divider, self.timer.divider_counter)) {
@@ -195,10 +223,10 @@ pub const Machine = struct {
             0x07 => self.timer.readTac(),
             0x0F => self.interrupts.readRequest(),
             0x40 => self.ppu.lcdc,
-            0x41 => self.ppu.stat | 0x80,
+            0x41 => self.ppu.readStat(),
             0x42 => self.ppu.scy,
             0x43 => self.ppu.scx,
-            0x44 => self.ppu.ly,
+            0x44 => self.ppu.readLy(),
             0x45 => self.ppu.lyc,
             0x46 => self.dma.source_high,
             0x47 => self.ppu.bgp,
@@ -223,36 +251,69 @@ pub const Machine = struct {
             0x06 => self.timer.writeTma(value),
             0x07 => self.timer.writeTac(value),
             0x0F => self.interrupts.writeRequest(value),
-            0x40 => self.ppu.lcdc = value,
-            0x41 => self.ppu.stat = (self.ppu.stat & 0x07) | (value & 0x78) | 0x80,
+            0x40 => self.applyPpuEvents(self.ppu.writeLcdc(value)),
+            0x41 => self.applyPpuEvents(self.ppu.writeStat(value)),
             0x42 => self.ppu.scy = value,
             0x43 => self.ppu.scx = value,
             0x44 => {},
-            0x45 => self.ppu.lyc = value,
+            0x45 => self.applyPpuEvents(self.ppu.writeLyc(value)),
             0x46 => self.dma.start(value),
-            0x47 => self.ppu.bgp = value,
-            0x48 => self.ppu.obp0 = value,
-            0x49 => self.ppu.obp1 = value,
+            0x47 => self.ppu.writeBgp(value),
+            0x48 => self.ppu.writeObp0(value),
+            0x49 => self.ppu.writeObp1(value),
             0x4A => self.ppu.wy = value,
-            0x4B => self.ppu.wx = value,
+            0x4B => self.ppu.writeWx(value),
             else => self.io[offset] = value,
         }
     }
 
     fn ppuAccessBlocked(self: *const Machine) bool {
-        return (self.ppu.lcdc & 0x80) != 0 and (self.ppu.stat & 0x03) == 3;
+        return self.ppu.cpuVramBlocked();
     }
 
     fn oamAccessBlocked(self: *const Machine) bool {
         if (self.dma.active) return true;
-        if ((self.ppu.lcdc & 0x80) == 0) return false;
-        const mode = self.ppu.stat & 0x03;
-        return mode == 2 or mode == 3;
+        return self.ppu.cpuOamBlocked();
+    }
+
+    /// The monochrome hardware has a main bus (cartridge and work RAM) and a
+    /// separate VRAM bus. OAM DMA only takes ownership of the bus supplying
+    /// its current source byte; CPU accesses on the other bus keep working.
+    /// OAM itself is blocked separately as the DMA destination, while I/O,
+    /// HRAM and IE are not members of either contended address range.
+    fn dmaContendsWith(self: *const Machine, address: u16) bool {
+        if (!self.dma.active or address >= 0xFE00) return false;
+        const source = (@as(u16, self.dma.active_source_high) << 8) | self.dma.byte_index;
+        return dmaBus(address) == dmaBus(source);
+    }
+
+    fn applyPpuEvents(self: *Machine, events: ppu.Events) void {
+        if (events.vblank_irq) self.interrupts.requestBit(0);
+        if (events.stat_irq) self.interrupts.requestBit(1);
     }
 
     fn cpuRead(context: *anyopaque, address: u16) u8 {
         const self: *Machine = @ptrCast(@alignCast(context));
         const value = self.read(address);
+        self.tickTcycles(4);
+        return value;
+    }
+
+    fn cpuOpcodeRead(context: *anyopaque, address: u16) u8 {
+        const self: *Machine = @ptrCast(@alignCast(context));
+        var value: u8 = undefined;
+        if (self.dmaContendsWith(address) and self.dma.byte_index >= 0x9D) {
+            // The final DMA M1 boundary releases the instruction fetch before
+            // ordinary data cycles. Operand and stack accesses still use the
+            // normal contention path in cpuRead.
+            if (address >= 0xFF00 and address <= 0xFF7F) {
+                value = self.readIo(@truncate(address));
+            } else {
+                value = self.bus.read(self.devices(), address);
+            }
+        } else {
+            value = self.read(address);
+        }
         self.tickTcycles(4);
         return value;
     }
@@ -278,6 +339,12 @@ pub const Machine = struct {
         self.interrupts.acknowledge(bit);
     }
 };
+
+const DmaBus = enum { main, vram };
+
+fn dmaBus(address: u16) DmaBus {
+    return if (address >= 0x8000 and address < 0xA000) .vram else .main;
+}
 
 fn postBootDivider(revision: model.Revision) u16 {
     // Mooneye's DMG ABC phase: six NOPs and the two LDH prefix cycles place

@@ -10,6 +10,7 @@ pub const CycleKind = enum { read, write, idle };
 pub const Bus = struct {
     context: *anyopaque,
     read_fn: *const fn (*anyopaque, u16) u8,
+    opcode_read_fn: ?*const fn (*anyopaque, u16) u8 = null,
     write_fn: *const fn (*anyopaque, u16, u8) void,
     idle_fn: *const fn (*anyopaque, u16, u8) void,
     pending_interrupts_fn: ?*const fn (*anyopaque) u8 = null,
@@ -651,7 +652,13 @@ pub const Cpu = struct {
     }
 
     fn fetchOpcode(self: *Cpu, bus: Bus) u8 {
-        const value = self.read(bus, self.registers.pc);
+        const value = if (bus.opcode_read_fn) |read_opcode| blk: {
+            const fetched = read_opcode(bus.context, self.registers.pc);
+            self.last_bus_address = self.registers.pc;
+            self.last_bus_value = fetched;
+            self.t_cycles +%= 4;
+            break :blk fetched;
+        } else self.read(bus, self.registers.pc);
         if (self.halt_bug) {
             self.halt_bug = false;
         } else {

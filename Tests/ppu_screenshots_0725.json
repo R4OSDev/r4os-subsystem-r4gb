@@ -1,0 +1,131 @@
+{
+  "schema": 1,
+  "revision": "dmg-c",
+  "entries": [
+    {
+      "rom": "Tests/Binaries/dmg-acid2-v1.0.gb",
+      "reference": "Tests/DMG-Acid2/img/reference-dmg.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m2_win_en_toggle.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m2_win_en_toggle.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_bgp_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_bgp_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_bgp_change_sprites.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_bgp_change_sprites.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_bg_en_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_bg_en_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_bg_map_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_bg_map_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_obj_en_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_obj_en_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_obj_en_change_variant.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_obj_en_change_variant.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_obj_size_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_obj_size_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_obj_size_change_scx.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_obj_size_change_scx.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_tile_sel_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_tile_sel_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_tile_sel_win_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_tile_sel_win_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_win_en_change_multiple.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_win_en_change_multiple.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_win_en_change_multiple_wx.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_win_en_change_multiple_wx.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_lcdc_win_map_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_lcdc_win_map_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_obp0_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_obp0_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_scx_high_5_bits.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_scx_high_5_bits.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_scx_low_3_bits.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_scx_low_3_bits.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_scy_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_scy_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_window_timing.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_window_timing.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_window_timing_wx_0.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_window_timing_wx_0.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_wx_4_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_wx_4_change.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_wx_4_change_sprites.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_wx_4_change_sprites.png",
+      "minimum_frames": 10
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_wx_5_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_wx_5_change.png",
+      "minimum_frames": 3
+    },
+    {
+      "rom": "Tests/Binaries/Mealybug-Tearoom-70e88fb/m3_wx_6_change.gb",
+      "reference": "Tests/Mealybug-Tearoom/expected/DMG-blob/m3_wx_6_change.png",
+      "minimum_frames": 3
+    }
+  ]
+}

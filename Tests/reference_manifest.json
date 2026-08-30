@@ -65,6 +65,24 @@
       "categories": ["machine", "dmg-c", "timer", "interrupt", "halt", "dma", "joypad", "serial", "revision-classified"]
     },
     {
+      "id": "mooneye-dmg-c-ppu-31510e1",
+      "path": "Tests/Binaries/Mooneye-mts-20260714-0944-31510e1/mts-20260714-0944-31510e1/acceptance",
+      "kind": "machine_rom_manifest",
+      "selection": "Tests/mooneye_dmg_c_0725.json",
+      "expected_files": 32,
+      "expected_records": 32,
+      "categories": ["machine", "dmg-c", "ppu", "stat", "lyc", "oam", "dma", "vblank", "lcd"]
+    },
+    {
+      "id": "dmg-ppu-screenshots-0725",
+      "path": ".",
+      "kind": "ppu_screenshot_manifest",
+      "selection": "Tests/ppu_screenshots_0725.json",
+      "expected_files": 25,
+      "expected_records": 25,
+      "categories": ["machine", "dmg-c", "ppu", "pixel-exact", "software-breakpoint"]
+    },
+    {
       "id": "mealybug-tearoom-70e88fb",
       "path": "Tests/Binaries/Mealybug-Tearoom-70e88fb",
       "kind": "rom_tree",

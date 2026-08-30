@@ -7,7 +7,7 @@ const max_vector_bytes: usize = 4 * 1024 * 1024;
 // harness ceiling sits above the largest legal 8 MiB Game Boy image.
 const max_rom_bytes: usize = 16 * 1024 * 1024;
 
-const SuiteKind = enum { sm83_json, rom_tree, rom_file, cartridge_tree, cpu_rom_file, machine_rom_manifest };
+const SuiteKind = enum { sm83_json, rom_tree, rom_file, cartridge_tree, cpu_rom_file, machine_rom_manifest, ppu_screenshot_manifest };
 
 const Suite = struct {
     id: []const u8,
@@ -43,7 +43,8 @@ fn run(init: std.process.Init) !void {
     const cwd = std.Io.Dir.cwd();
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const root = if (args.len >= 2) args[1] else "../../../ExFiles/Reference/GameBoy";
-    const suite_filter: ?[]const u8 = if (args.len >= 3) args[2] else null;
+    const suite_filter: ?[]const u8 = if (args.len >= 3 and args[2].len != 0) args[2] else null;
+    const case_filter: ?[]const u8 = if (args.len >= 4) args[3] else null;
     cwd.access(io, root, .{}) catch {
         std.debug.print("R4GB reference harness SKIP: optional root missing: {s}\n", .{root});
         return;
@@ -74,12 +75,15 @@ fn run(init: std.process.Init) !void {
             .rom_file => try scanRomFile(allocator, io, cwd, suite_path),
             .cartridge_tree => try scanCartridgeTree(allocator, io, cwd, suite_path),
             .cpu_rom_file => try scanCpuRomFile(allocator, io, cwd, suite_path),
-            .machine_rom_manifest => try scanMachineRomManifest(allocator, io, cwd, suite_path, suite.selection orelse return error.MissingSelectionManifest),
+            .machine_rom_manifest => try scanMachineRomManifest(allocator, io, cwd, suite_path, suite.selection orelse return error.MissingSelectionManifest, case_filter),
+            .ppu_screenshot_manifest => try scanPpuScreenshotManifest(allocator, io, cwd, suite_path, suite.selection orelse return error.MissingSelectionManifest, case_filter),
         };
-        if (summary.files != suite.expected_files or summary.records != suite.expected_records) {
+        const expected_files = if (case_filter == null) suite.expected_files else 1;
+        const expected_records = if (case_filter == null) suite.expected_records else 1;
+        if (summary.files != expected_files or summary.records != expected_records) {
             std.debug.print(
                 "R4GB reference suite mismatch: {s} files={d}/{d} records={d}/{d}\n",
-                .{ suite.id, summary.files, suite.expected_files, summary.records, suite.expected_records },
+                .{ suite.id, summary.files, expected_files, summary.records, expected_records },
             );
             return error.ReferenceCountMismatch;
         }
@@ -193,6 +197,7 @@ fn scanMachineRomManifest(
     cwd: std.Io.Dir,
     root: []const u8,
     selection_path: []const u8,
+    case_filter: ?[]const u8,
 ) !Summary {
     const selection_bytes = try cwd.readFileAlloc(io, selection_path, allocator, .limited(max_manifest_bytes));
     defer allocator.free(selection_bytes);
@@ -205,6 +210,9 @@ fn scanMachineRomManifest(
     var deferred_ppu: usize = 0;
     var foreign_revision: usize = 0;
     for (parsed.value.entries) |entry| {
+        if (case_filter) |filter| {
+            if (!std.mem.eql(u8, filter, entry.path)) continue;
+        }
         const path = try std.fs.path.join(allocator, &.{ root, entry.path });
         defer allocator.free(path);
         const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
@@ -224,6 +232,7 @@ fn scanMachineRomManifest(
             .foreign_revision => foreign_revision += 1,
         }
     }
+    if (case_filter != null and result.files == 0) return error.ReferenceCaseNotFound;
     std.debug.print(
         "R4GB machine selection: revision={s} required={d} deferred-ppu={d} foreign-revision={d}\n",
         .{ parsed.value.revision, result.files, deferred_ppu, foreign_revision },
@@ -307,10 +316,9 @@ fn runMooneyeCpuRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
 fn runMooneyeMachineRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
     var machine = core.machine.Machine.init(.dmg_c, try core.cartridge.Cartridge.init(allocator, bytes));
     defer machine.deinit();
-    // The 0.72.4 set contains no PPU-dependent required cases. Once execution
-    // enters Mooneye's bank-1 reporting library, marking LY unavailable selects
-    // its documented register-result path without altering post-boot MMIO tests.
-    const instruction_budget: usize = 50_000_000;
+    // A live PPU now carries Mooneye's reporting library through its two
+    // VBlanks; result registers are observed at the suite's LD B,B breakpoint.
+    const instruction_budget: usize = 5_000_000;
     var instructions: usize = 0;
     var div_reads: [16]u16 = undefined;
     var div_read_count: usize = 0;
@@ -331,13 +339,16 @@ fn runMooneyeMachineRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
             machine.cpu.registers.h == 0x42 and machine.cpu.registers.l == 0x42)
         {
             std.debug.print(
-                "R4GB Mooneye failure state: pc={x:0>4} last-main-pc={x:0>4} sp={x:0>4} a={x:0>2} f={x:0>2} cycles={d} div={x:0>4} if={x:0>2} ie={x:0>2}\n",
-                .{ machine.cpu.registers.pc, last_program_counter, machine.cpu.registers.sp, machine.cpu.registers.a, machine.cpu.registers.f, machine.guest_t_cycles, machine.timer.divider_counter, machine.interrupts.readRequest(), machine.interrupts.enable },
+                "R4GB Mooneye failure state: pc={x:0>4} last-main-pc={x:0>4} sp={x:0>4} a={x:0>2} f={x:0>2} cycles={d} div={x:0>4} if={x:0>2} ie={x:0>2} ppu-line={d} ppu-ly={d} ppu-dot={d} ppu-mode={s}\n",
+                .{ machine.cpu.registers.pc, last_program_counter, machine.cpu.registers.sp, machine.cpu.registers.a, machine.cpu.registers.f, machine.guest_t_cycles, machine.timer.divider_counter, machine.interrupts.readRequest(), machine.interrupts.enable, machine.ppu.line, machine.ppu.ly, machine.ppu.dot, @tagName(machine.ppu.mode()) },
             );
             std.debug.print(
                 "R4GB Mooneye saved: f={x:0>2} a={x:0>2} c={x:0>2} b={x:0>2} e={x:0>2} d={x:0>2} l={x:0>2} h={x:0>2} flags={x:0>2}\n",
                 .{ machine.bus.high_ram[0], machine.bus.high_ram[1], machine.bus.high_ram[2], machine.bus.high_ram[3], machine.bus.high_ram[4], machine.bus.high_ram[5], machine.bus.high_ram[6], machine.bus.high_ram[7], machine.bus.high_ram[8] },
             );
+            std.debug.print("R4GB Mooneye HRAM[00..1f]:", .{});
+            for (machine.bus.high_ram[0..32]) |value| std.debug.print(" {x:0>2}", .{value});
+            std.debug.print("\n", .{});
             std.debug.print("R4GB Mooneye DIV read phases:", .{});
             for (div_reads[0..div_read_count]) |phase| std.debug.print(" {x:0>4}", .{phase});
             std.debug.print("\n", .{});
@@ -348,7 +359,6 @@ fn runMooneyeMachineRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
         }
         const pc = machine.cpu.registers.pc;
         if (pc < 0x4000) last_program_counter = pc;
-        if (pc >= 0x4000) machine.ppu.ly = 0xFF;
         const div_read = machine.cartridge.readRom(pc) == 0xF0 and machine.cartridge.readRom(pc +% 1) == 0x04;
         const old_serial_bits = machine.serial.bits_remaining;
         const execution = machine.stepCpu();
@@ -362,7 +372,249 @@ fn runMooneyeMachineRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
         }
         if (execution.kind == .illegal) return error.MooneyeMachineIllegalOpcode;
     }
+    std.debug.print(
+        "R4GB Mooneye timeout state: pc={x:0>4} sp={x:0>4} a={x:0>2} f={x:0>2} bc={x:0>2}{x:0>2} de={x:0>2}{x:0>2} hl={x:0>2}{x:0>2} cycles={d} if={x:0>2} ie={x:0>2} ppu-line={d} ppu-ly={d} ppu-dot={d} ppu-mode={s}\n",
+        .{ machine.cpu.registers.pc, machine.cpu.registers.sp, machine.cpu.registers.a, machine.cpu.registers.f, machine.cpu.registers.b, machine.cpu.registers.c, machine.cpu.registers.d, machine.cpu.registers.e, machine.cpu.registers.h, machine.cpu.registers.l, machine.guest_t_cycles, machine.interrupts.readRequest(), machine.interrupts.enable, machine.ppu.line, machine.ppu.ly, machine.ppu.dot, @tagName(machine.ppu.mode()) },
+    );
     return error.MooneyeMachineTimeout;
+}
+
+const ScreenshotEntry = struct {
+    rom: []const u8,
+    reference: []const u8,
+    minimum_frames: u16,
+};
+
+const ScreenshotSelection = struct {
+    schema: u32,
+    revision: []const u8,
+    entries: []const ScreenshotEntry,
+};
+
+fn scanPpuScreenshotManifest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cwd: std.Io.Dir,
+    root: []const u8,
+    selection_path: []const u8,
+    case_filter: ?[]const u8,
+) !Summary {
+    const selection_bytes = try cwd.readFileAlloc(io, selection_path, allocator, .limited(max_manifest_bytes));
+    defer allocator.free(selection_bytes);
+    var parsed = try std.json.parseFromSlice(ScreenshotSelection, allocator, selection_bytes, .{});
+    defer parsed.deinit();
+    if (parsed.value.schema != 1) return error.UnsupportedScreenshotSelectionSchema;
+    if (!std.mem.eql(u8, parsed.value.revision, "dmg-c")) return error.UnsupportedScreenshotRevision;
+
+    var result = Summary{};
+    for (parsed.value.entries) |entry| {
+        if (case_filter) |filter| {
+            if (!std.mem.eql(u8, filter, entry.rom)) continue;
+        }
+        const rom_path = try std.fs.path.join(allocator, &.{ root, entry.rom });
+        defer allocator.free(rom_path);
+        const reference_path = try std.fs.path.join(allocator, &.{ root, entry.reference });
+        defer allocator.free(reference_path);
+        const rom_bytes = try cwd.readFileAlloc(io, rom_path, allocator, .limited(max_rom_bytes));
+        defer allocator.free(rom_bytes);
+        const png_bytes = try cwd.readFileAlloc(io, reference_path, allocator, .limited(max_vector_bytes));
+        defer allocator.free(png_bytes);
+        try validateRomIdentity(rom_bytes);
+        const expected = try decodeDmgPng(png_bytes);
+        runPpuScreenshotRom(allocator, rom_bytes, &expected, entry.minimum_frames, entry.rom) catch |fault| {
+            std.debug.print("R4GB PPU screenshot FAILED: rom={s} reference={s} error={s}\n", .{ entry.rom, entry.reference, @errorName(fault) });
+            return fault;
+        };
+        result.files += 1;
+        result.records += 1;
+        mixDigest(&result.digest, entry.rom, rom_bytes);
+        mixDigest(&result.digest, entry.reference, png_bytes);
+    }
+    if (case_filter != null and result.files == 0) return error.ReferenceCaseNotFound;
+    return result;
+}
+
+fn runPpuScreenshotRom(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    expected: *const [core.ppu.frame_pixels]u8,
+    minimum_frames: u16,
+    name: []const u8,
+) !void {
+    var machine = core.machine.Machine.init(.dmg_c, try core.cartridge.Cartridge.init(allocator, bytes));
+    defer machine.deinit();
+    const instruction_budget: usize = 5_000_000;
+    var instructions: usize = 0;
+    while (instructions < instruction_budget) : (instructions += 1) {
+        const pc = machine.cpu.registers.pc;
+        if (machine.ppu.frames_completed >= minimum_frames and pc < 0x8000 and machine.cartridge.readRom(pc) == 0x40) {
+            var differences: usize = 0;
+            var first_difference: ?usize = null;
+            for (machine.ppu.framebuffer, expected.*, 0..) |actual, wanted, index| {
+                if (actual == wanted) continue;
+                differences += 1;
+                if (first_difference == null) first_difference = index;
+            }
+            if (first_difference) |index| {
+                std.debug.print(
+                    "R4GB pixel mismatch: rom={s} frame={d} different={d}/{d} first=({d},{d}) actual={d} expected={d}\n",
+                    .{ name, machine.ppu.frames_completed, differences, core.ppu.frame_pixels, index % core.ppu.width, index / core.ppu.width, machine.ppu.framebuffer[index], expected[index] },
+                );
+                var reported: usize = 0;
+                for (machine.ppu.framebuffer, expected.*, 0..) |actual, wanted, mismatch_index| {
+                    if (actual == wanted) continue;
+                    std.debug.print(" ({d},{d}:{d}>{d})", .{ mismatch_index % core.ppu.width, mismatch_index / core.ppu.width, actual, wanted });
+                    reported += 1;
+                    if (reported == 16) break;
+                }
+                std.debug.print("\n", .{});
+                const first_y = index / core.ppu.width;
+                printPixelRuns("actual", first_y, machine.ppu.framebuffer[first_y * core.ppu.width ..][0..core.ppu.width]);
+                printPixelRuns("expected", first_y, expected[first_y * core.ppu.width ..][0..core.ppu.width]);
+                printDifferenceRows(&machine.ppu.framebuffer, expected);
+                return error.PpuScreenshotMismatch;
+            }
+            return;
+        }
+        const execution = machine.stepCpu();
+        if (execution.kind == .illegal) return error.PpuScreenshotIllegalOpcode;
+    }
+    std.debug.print(
+        "R4GB screenshot timeout: rom={s} pc={x:0>4} frame={d} line={d} dot={d}\n",
+        .{ name, machine.cpu.registers.pc, machine.ppu.frames_completed, machine.ppu.line, machine.ppu.dot },
+    );
+    return error.PpuScreenshotTimeout;
+}
+
+fn printDifferenceRows(actual: *const [core.ppu.frame_pixels]u8, expected: *const [core.ppu.frame_pixels]u8) void {
+    var reported: usize = 0;
+    for (0..core.ppu.height) |y| {
+        var count: usize = 0;
+        var first: usize = core.ppu.width;
+        var last: usize = 0;
+        for (0..core.ppu.width) |x| {
+            const index = y * core.ppu.width + x;
+            if (actual[index] == expected[index]) continue;
+            count += 1;
+            first = @min(first, x);
+            last = x;
+        }
+        if (count == 0) continue;
+        if (reported < 16) std.debug.print("R4GB row difference: y={d} count={d} span={d}..{d}\n", .{ y, count, first, last });
+        reported += 1;
+    }
+}
+
+fn printPixelRuns(label: []const u8, y: usize, pixels: []const u8) void {
+    std.debug.print("R4GB row {d:0>3} {s}:", .{ y, label });
+    var start: usize = 0;
+    while (start < pixels.len) {
+        var end = start + 1;
+        while (end < pixels.len and pixels[end] == pixels[start]) end += 1;
+        std.debug.print(" {d}x{d}", .{ pixels[start], end - start });
+        start = end;
+    }
+    std.debug.print("\n", .{});
+}
+
+fn decodeDmgPng(bytes: []const u8) ![core.ppu.frame_pixels]u8 {
+    const signature = [_]u8{ 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    if (bytes.len < signature.len or !std.mem.eql(u8, bytes[0..signature.len], &signature)) return error.InvalidPngSignature;
+
+    var bit_depth: u8 = 0;
+    var idat: ?[]const u8 = null;
+    var cursor: usize = signature.len;
+    while (cursor + 12 <= bytes.len) {
+        const length = std.mem.readInt(u32, bytes[cursor..][0..4], .big);
+        const payload_start = cursor + 8;
+        const payload_end = payload_start + @as(usize, length);
+        if (payload_end + 4 > bytes.len) return error.TruncatedPngChunk;
+        const chunk_type = bytes[cursor + 4 .. cursor + 8];
+        const payload = bytes[payload_start..payload_end];
+        if (std.mem.eql(u8, chunk_type, "IHDR")) {
+            if (payload.len != 13 or std.mem.readInt(u32, payload[0..4], .big) != core.ppu.width or
+                std.mem.readInt(u32, payload[4..8], .big) != core.ppu.height)
+            {
+                return error.UnsupportedPngDimensions;
+            }
+            bit_depth = payload[8];
+            if ((bit_depth != 1 and bit_depth != 2 and bit_depth != 8) or payload[9] != 0 or
+                payload[10] != 0 or payload[11] != 0 or payload[12] != 0)
+            {
+                return error.UnsupportedPngFormat;
+            }
+        } else if (std.mem.eql(u8, chunk_type, "IDAT")) {
+            if (idat != null) return error.MultiplePngDataChunks;
+            idat = payload;
+        } else if (std.mem.eql(u8, chunk_type, "IEND")) {
+            break;
+        }
+        cursor = payload_end + 4;
+    }
+    if (bit_depth == 0) return error.MissingPngHeader;
+    const compressed = idat orelse return error.MissingPngData;
+    const row_bytes = (core.ppu.width * @as(usize, bit_depth) + 7) / 8;
+    const raw_len = (row_bytes + 1) * core.ppu.height;
+    var raw: [core.ppu.height * (core.ppu.width + 1)]u8 = undefined;
+    var compressed_reader: std.Io.Reader = .fixed(compressed);
+    var decompressor: std.compress.flate.Decompress = .init(&compressed_reader, .zlib, &.{});
+    var raw_writer: std.Io.Writer = .fixed(raw[0..raw_len]);
+    const written = try decompressor.reader.streamRemaining(&raw_writer);
+    if (written != raw_len) return error.InvalidPngDataLength;
+
+    var expected: [core.ppu.frame_pixels]u8 = undefined;
+    var previous: [core.ppu.width]u8 = .{0} ** core.ppu.width;
+    var current: [core.ppu.width]u8 = undefined;
+    var raw_offset: usize = 0;
+    var y: usize = 0;
+    while (y < core.ppu.height) : (y += 1) {
+        const filter = raw[raw_offset];
+        raw_offset += 1;
+        var byte_index: usize = 0;
+        while (byte_index < row_bytes) : (byte_index += 1) {
+            const encoded = raw[raw_offset + byte_index];
+            const left: u8 = if (byte_index == 0) 0 else current[byte_index - 1];
+            const above = previous[byte_index];
+            const upper_left: u8 = if (byte_index == 0) 0 else previous[byte_index - 1];
+            current[byte_index] = switch (filter) {
+                0 => encoded,
+                1 => encoded +% left,
+                2 => encoded +% above,
+                3 => encoded +% @as(u8, @intCast((@as(u16, left) + above) / 2)),
+                4 => encoded +% paeth(left, above, upper_left),
+                else => return error.UnsupportedPngFilter,
+            };
+        }
+        raw_offset += row_bytes;
+        var x: usize = 0;
+        while (x < core.ppu.width) : (x += 1) {
+            const bit_offset = x * bit_depth;
+            const shift: u3 = @intCast(8 - bit_depth - bit_offset % 8);
+            const mask: u8 = if (bit_depth == 8) 0xFF else (@as(u8, 1) << @intCast(bit_depth)) - 1;
+            const sample = (current[bit_offset / 8] >> shift) & mask;
+            const grayscale: u16 = @as(u16, sample) * 255 / mask;
+            if (grayscale % 85 != 0) return error.NonDmgGrayscaleLevel;
+            expected[y * core.ppu.width + x] = @intCast((255 - grayscale) / 85);
+        }
+        previous = current;
+    }
+    return expected;
+}
+
+fn paeth(left: u8, above: u8, upper_left: u8) u8 {
+    const a: i16 = left;
+    const b: i16 = above;
+    const c: i16 = upper_left;
+    const prediction = a + b - c;
+    const distance_a = @abs(prediction - a);
+    const distance_b = @abs(prediction - b);
+    const distance_c = @abs(prediction - c);
+    return if (distance_a <= distance_b and distance_a <= distance_c)
+        left
+    else if (distance_b <= distance_c)
+        above
+    else
+        upper_left;
 }
 
 fn validateRomIdentity(bytes: []const u8) !void {
