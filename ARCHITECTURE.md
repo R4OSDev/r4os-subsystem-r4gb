@@ -13,8 +13,9 @@ The component boundaries are:
 | `cartridge` | immutable ROM view, parsed header, mapper and external-RAM state | CPU or host files |
 | `bus` | DMG address decoding, WRAM, HRAM, unusable/open-bus policy | host address space |
 | `cpu` | SM83 registers and execution state | timing peripherals |
+| `clock` | bounded host-to-guest cycle budgets and fractional conversion | device state or wall-clock decisions |
 | `timer` | divider edge state, TIMA/TMA/TAC and reload pipeline | CPU instruction dispatch |
-| `interrupts` | IF, IE, IME transition state and priority | peripheral implementation |
+| `interrupts` | IF, IE, request/acknowledge state and priority | peripheral implementation or CPU IME |
 | `dma` | OAM DMA source, phase and CPU bus exclusion | PPU rendering |
 | `ppu` | VRAM, OAM, LCD registers, dot/mode pipeline and 160x144 indices | host window scaling |
 | `apu` | four DMG channels, frame sequencer and deterministic mixer | R4OS audio service buffering |
@@ -23,11 +24,14 @@ The component boundaries are:
 | `persistence` | battery SRAM/RTC serialization state | save-state snapshots |
 | `host_adapter` | R4SUBSYS1, R4OS files/window/input/audio translation | guest hardware behavior |
 
-`Machine` coordinates components in T-cycle order. Host time is sampled only
-by the host adapter. The guest receives monotonic, pause-corrected time through
-the common subsystem runtime. Audio uses caller-owned PCM buffers and the
-normal application audio service. Window presentation and keyboard mapping
-use `r4os.subsystem_host`; neither affects emulated time.
+`Machine` coordinates components in the stable T-cycle order timer/divider,
+DMA, serial, and the later PPU/APU stages. Every CPU read, write, or idle
+M-cycle advances exactly four T-cycles. Host time is sampled only by the host
+adapter. The guest receives monotonic, pause-corrected time through the common
+subsystem runtime; a host delay grants at most one bounded slice and discarded
+excess time is never replayed as catch-up. Audio uses caller-owned PCM buffers
+and the normal application audio service. Window presentation and keyboard
+mapping use `r4os.subsystem_host`; neither affects emulated time.
 
 ## Boot model
 
@@ -75,10 +79,40 @@ delayed EI, DI, RETI, HALT, the HALT bug, STOP, interrupt vectors, and the
 documented illegal-opcode lock are explicit instance fields. No decode table,
 scratch register, or pending transition is shared between machines.
 
+## Clocked I/O boundary
+
+DIV is the visible high byte of one 16-bit system counter. TIMA observes the
+selected counter bit's falling edge, including edges created by DIV and TAC
+writes. Overflow exposes zero for four T-cycles before TMA reload and the timer
+request; TIMA and TMA writes honor the reload cancellation and write windows.
+The counter and DMA freeze in STOP. A selected P1 high-to-low transition wakes
+STOP independently of IE while also requesting the joypad interrupt.
+
+Interrupt entry is five M-cycles. IF is acknowledged only after the stack's
+low-byte write. The enabled request set is sampled again after the high-byte
+write, so an IE write at `0xFFFF` can cancel dispatch or select a new
+higher-priority vector exactly as on DMG hardware. HALT, delayed EI, immediate
+DMG DI, RETI, and the HALT bug remain CPU-owned state.
+
+OAM DMA starts after two M-cycles, transfers one byte per M-cycle, and exposes
+only HRAM plus the DMA control register to the CPU while active. A new FF46
+write preserves the old transfer during the start delay and then restarts at
+byte zero. DMG source decoding covers ROM, VRAM, cartridge RAM, WRAM, and the
+E000-FFFF echo behavior without routing a DMA address through the blocked CPU
+bus.
+
+P1 combines either or both active-low four-line rows. Physical HID usages are
+mapped by side, repeated make events do not create edges, and focus loss
+releases all held buttons. SB/SC use the shared post-boot divider phase; an
+internal transfer shifts eight pulled-up input bits and requests Serial, while
+external-clock mode remains pending without host blocking or network access.
+
 ## Test boundary
 
 Small original fixtures live in this repository. Large JSON vectors and open
 test ROMs remain in the ignored workspace `ExFiles` tree. `reference-test`
 derives that tree from the repository location or accepts an explicit root;
 missing optional material is reported as `SKIP`, never fetched implicitly.
-Commercial ROMs are local manual compatibility inputs only.
+The DMG-C machine selection executes 33 revision-applicable Mooneye cases and
+records PPU-dependent and foreign-revision cases separately. Commercial ROMs
+are local manual compatibility inputs only.

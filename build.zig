@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) void {
     const run_references = b.addRunArtifact(reference_harness);
     run_references.setCwd(b.path("."));
     run_references.addArg(b.option([]const u8, "gb-reference-root", "Game Boy reference root; absent material is skipped") orelse "../../../ExFiles/Reference/GameBoy");
+    if (b.option([]const u8, "gb-reference-suite", "Run only one reference suite by manifest id")) |suite| run_references.addArg(suite);
 
     const cartridge_probe_root = b.createModule(.{
         .root_source_file = b.path("Tests/cartridge_probe.zig"),

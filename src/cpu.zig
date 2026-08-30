@@ -12,6 +12,8 @@ pub const Bus = struct {
     read_fn: *const fn (*anyopaque, u16) u8,
     write_fn: *const fn (*anyopaque, u16, u8) void,
     idle_fn: *const fn (*anyopaque, u16, u8) void,
+    pending_interrupts_fn: ?*const fn (*anyopaque) u8 = null,
+    acknowledge_interrupt_fn: ?*const fn (*anyopaque, u3) void = null,
 };
 
 pub const ExecutionKind = enum {
@@ -36,6 +38,7 @@ pub const Cpu = struct {
     ime_enable_pending: bool = false,
     halted: bool = false,
     stopped: bool = false,
+    stop_wake_requested: bool = false,
     halt_bug: bool = false,
     locked: bool = false,
     illegal_opcode: ?u8 = null,
@@ -59,11 +62,18 @@ pub const Cpu = struct {
 
         const pending = pending_interrupts & 0x1F;
         if (self.stopped) {
-            if (pending == 0) {
+            if (pending == 0 and !self.stop_wake_requested) {
                 self.idle(bus);
                 return self.makeResult(.stopped, 0x10, null, null, before);
             }
+            self.stop_wake_requested = false;
+            // DMG resumes after the wake-detection M-cycle plus two internal
+            // M-cycles. Instruction execution continues on the next step.
+            self.idle(bus);
             self.stopped = false;
+            self.idle(bus);
+            self.idle(bus);
+            return self.makeResult(.stopped, 0x10, null, null, before);
         }
         if (self.halted) {
             if (pending == 0) {
@@ -74,8 +84,8 @@ pub const Cpu = struct {
         }
         if (self.ime and pending != 0) {
             const bit: u3 = @intCast(@ctz(pending));
-            self.serviceInterrupt(bus, bit);
-            return self.makeResult(.interrupt, 0, null, bit, before);
+            const dispatched = self.serviceInterrupt(bus, bit);
+            return self.makeResult(.interrupt, 0, null, dispatched, before);
         }
 
         const enable_after_instruction = self.ime_enable_pending;
@@ -91,6 +101,10 @@ pub const Cpu = struct {
         if (enable_after_instruction and opcode != 0xF3) self.ime = true;
         self.registers.f &= 0xF0;
         return self.makeResult(.instruction, opcode, cb_opcode, null, before);
+    }
+
+    pub fn requestStopWake(self: *Cpu) void {
+        if (self.stopped) self.stop_wake_requested = true;
     }
 
     fn makeResult(
@@ -110,15 +124,33 @@ pub const Cpu = struct {
         };
     }
 
-    fn serviceInterrupt(self: *Cpu, bus: Bus, bit: u3) void {
+    fn serviceInterrupt(self: *Cpu, bus: Bus, initial_bit: u3) ?u3 {
         self.ime = false;
         self.ime_enable_pending = false;
         self.halt_bug = false;
         self.idle(bus);
         self.idle(bus);
-        self.push16(bus, self.registers.pc);
-        self.registers.pc = 0x0040 + @as(u16, bit) * 8;
+        self.registers.sp -%= 1;
+        self.write(bus, self.registers.sp, @truncate(self.registers.pc >> 8));
+
+        // The upper PC push may target IE at $FFFF. Hardware samples the
+        // enabled requests again here: dispatch can be cancelled or retargeted.
+        const pending = if (bus.pending_interrupts_fn) |callback|
+            callback(bus.context) & 0x1F
+        else
+            @as(u8, 1) << initial_bit;
+        const dispatched: ?u3 = if (pending == 0) null else @intCast(@ctz(pending));
+
+        self.registers.sp -%= 1;
+        self.write(bus, self.registers.sp, @truncate(self.registers.pc));
+        if (dispatched) |bit| {
+            if (bus.acknowledge_interrupt_fn) |callback| callback(bus.context, bit);
+            self.registers.pc = 0x0040 + @as(u16, bit) * 8;
+        } else {
+            self.registers.pc = 0;
+        }
         self.idle(bus);
+        return dispatched;
     }
 
     fn executeBase(self: *Cpu, bus: Bus, opcode: u8, pending_interrupts: u8, cb_opcode: *?u8) bool {

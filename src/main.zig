@@ -48,6 +48,29 @@ noinline fn executeCpuProbe(processor: *core.cpu.Cpu, memory: *CpuSelfTestMemory
     return processor.step(memory.bus(), 0);
 }
 
+noinline fn executeMachineProbe(machine: *core.machine.Machine) bool {
+    const execution = machine.stepCpu();
+    machine.write(0xFF04, 0);
+    machine.write(0xFF05, 4);
+    machine.write(0xFF07, 0x05);
+    machine.write(0xFF00, 0x10);
+    machine.setButton(.a, true, false);
+    machine.bus.work_ram[0] = 0x6D;
+    machine.write(0xFF46, 0xC0);
+    machine.tickTcycles(648);
+    machine.write(0xFF01, 0);
+    machine.write(0xFF02, 0x81);
+    machine.tickTcycles(4096);
+    const first_budget = machine.runHostSlice(1_000_000);
+    const second_budget = machine.runHostSlice(1_001_000);
+    return execution.kind == .instruction and
+        machine.read(0xFF00) == 0xDE and
+        machine.ppu.oam[0] == 0x6D and
+        machine.serial.data == 0xFF and
+        (machine.interrupts.request & 0x18) == 0x18 and
+        first_budget == 0 and second_budget >= 4;
+}
+
 pub fn r4_app_main(app: *r4os.App) i32 {
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
     if (app.profile != .desktop) return error_profile;
@@ -151,6 +174,11 @@ fn selfTest(app: *r4os.App) i32 {
         sys.println("R4GB cartridge selftest FAILED: cartridge");
         return 90;
     };
+    var machine = core.machine.Machine.init(.dmg_c, core.cartridge.Cartridge.init(allocator, bytes) catch {
+        sys.println("R4GB cartridge selftest FAILED: machine allocation");
+        return 90;
+    });
+    defer machine.deinit();
     var cpu_profile = core.model.profile(.dmg_c);
     cpu_profile.registers.pc = 0x0100;
     var processor = core.cpu.Cpu.init(cpu_profile);
@@ -160,7 +188,8 @@ fn selfTest(app: *r4os.App) i32 {
         core.model.production_revision != .dmg_c or
         cpu_result.kind != .instruction or cpu_result.m_cycles != 2 or
         processor.registers.a != 0x42 or processor.registers.pc != 0x0102 or
-        core.host_adapter.buttonForPhysicalUsage(core.host_adapter.physical_usage_right_control) != .select)
+        core.host_adapter.buttonForPhysicalUsage(core.host_adapter.physical_usage_right_control) != .select or
+        !executeMachineProbe(&machine))
     {
         sys.println("R4GB cartridge selftest FAILED: model");
         return 91;

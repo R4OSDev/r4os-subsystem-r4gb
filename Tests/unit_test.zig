@@ -139,8 +139,10 @@ test "HALT bug, STOP wake and interrupt stack order are deterministic" {
     try std.testing.expect(processor.stopped);
     const stopped = processor.step(memory.bus(), 0);
     try std.testing.expectEqual(core.cpu.ExecutionKind.stopped, stopped.kind);
-    _ = processor.step(memory.bus(), 1);
+    const waking = processor.step(memory.bus(), 1);
     try std.testing.expect(!processor.stopped);
+    try std.testing.expectEqual(@as(u8, 3), waking.m_cycles);
+    try std.testing.expectEqual(@as(u16, 0x0201), processor.registers.pc);
 
     memory = .{};
     processor = testCpu(0x1234, 0xC000);
@@ -520,4 +522,189 @@ test "the complete 64 KiB bus is bounded, mirrored and device-gated" {
         _ = bus.read(devices, address);
         bus.write(devices, address, @truncate(raw));
     }
+}
+
+test "machine timer, serial and DMA remain identical across host slice partitioning" {
+    const allocator = std.testing.allocator;
+    const left_bytes = try makeRom(allocator, 0x00, 0x00, 0x00, 0x00);
+    defer allocator.free(left_bytes);
+    const right_bytes = try allocator.dupe(u8, left_bytes);
+    defer allocator.free(right_bytes);
+    var left = core.machine.Machine.init(.dmg_c, try core.cartridge.Cartridge.init(allocator, left_bytes));
+    defer left.deinit();
+    var right = core.machine.Machine.init(.dmg_c, try core.cartridge.Cartridge.init(allocator, right_bytes));
+    defer right.deinit();
+
+    left.write(0xFF04, 0);
+    right.write(0xFF04, 0);
+    left.write(0xFF05, 0xFA);
+    right.write(0xFF05, 0xFA);
+    left.write(0xFF06, 0x61);
+    right.write(0xFF06, 0x61);
+    left.write(0xFF07, 0x05);
+    right.write(0xFF07, 0x05);
+    left.write(0xFF01, 0);
+    right.write(0xFF01, 0);
+    left.write(0xFF02, 0x81);
+    right.write(0xFF02, 0x81);
+    left.bus.work_ram[0] = 0xD4;
+    right.bus.work_ram[0] = 0xD4;
+    left.write(0xFF46, 0xC0);
+    right.write(0xFF46, 0xC0);
+
+    left.tickTcycles(8192);
+    var remaining: u32 = 8192;
+    const chunks = [_]u32{ 1, 3, 17, 64, 257, 997 };
+    var chunk_index: usize = 0;
+    while (remaining != 0) : (chunk_index += 1) {
+        const amount = @min(remaining, chunks[chunk_index % chunks.len]);
+        right.tickTcycles(amount);
+        remaining -= amount;
+    }
+
+    try std.testing.expectEqual(left.timer.divider_counter, right.timer.divider_counter);
+    try std.testing.expectEqual(left.timer.tima, right.timer.tima);
+    try std.testing.expectEqual(left.interrupts.request, right.interrupts.request);
+    try std.testing.expectEqual(left.serial.data, right.serial.data);
+    try std.testing.expectEqual(left.serial.control, right.serial.control);
+    try std.testing.expectEqual(left.dma.active, right.dma.active);
+    try std.testing.expectEqualSlices(u8, left.ppu.oam[0..], right.ppu.oam[0..]);
+    try std.testing.expectEqual(@as(u8, 0xD4), left.ppu.oam[0]);
+}
+
+test "machine interrupt dispatch can cancel or retarget after the IE push" {
+    const allocator = std.testing.allocator;
+    const bytes = try makeRom(allocator, 0x00, 0x00, 0x00, 0x00);
+    defer allocator.free(bytes);
+    var machine = core.machine.Machine.init(.dmg_c, try core.cartridge.Cartridge.init(allocator, bytes));
+    defer machine.deinit();
+
+    machine.cpu.registers.pc = 0x0200;
+    machine.cpu.registers.sp = 0x0000;
+    machine.cpu.ime = true;
+    machine.interrupts.enable = 0x04;
+    machine.interrupts.writeRequest(0x04);
+    const cancelled = machine.stepCpu();
+    try std.testing.expectEqual(core.cpu.ExecutionKind.interrupt, cancelled.kind);
+    try std.testing.expect(cancelled.interrupt_bit == null);
+    try std.testing.expectEqual(@as(u16, 0), machine.cpu.registers.pc);
+    try std.testing.expectEqual(@as(u8, 0x04), machine.interrupts.request);
+    try std.testing.expect(!machine.cpu.ime);
+
+    machine.cpu.registers.pc = 0x0200;
+    machine.cpu.registers.sp = 0x0000;
+    machine.cpu.ime = true;
+    machine.interrupts.enable = 0x03;
+    machine.interrupts.writeRequest(0x03);
+    const retargeted = machine.stepCpu();
+    try std.testing.expectEqual(@as(?u3, 1), retargeted.interrupt_bit);
+    try std.testing.expectEqual(@as(u16, 0x0048), machine.cpu.registers.pc);
+    try std.testing.expectEqual(@as(u8, 0x01), machine.interrupts.request);
+}
+
+test "physical keyboard input preserves sides, edges, repeats and focus release" {
+    var adapter = core.host_adapter.HostAdapter{};
+    var pad = core.joypad.Joypad{};
+    var irq = core.interrupts.Interrupts{ .request = 0, .enable = 0 };
+    try std.testing.expect(!adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_space, true, false));
+    adapter.focusGained();
+    try std.testing.expect(adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_space, true, false));
+    try std.testing.expectEqual(@as(u8, 0), irq.request);
+    _ = pad.write(0x10);
+    try std.testing.expect(adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_enter, true, false));
+    try std.testing.expectEqual(@as(u8, 0x10), irq.request);
+    irq.writeRequest(0);
+    try std.testing.expect(adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_enter, true, true));
+    try std.testing.expectEqual(@as(u8, 0), irq.request);
+    try std.testing.expect(adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_left_alt, true, false));
+    try std.testing.expectEqual(@as(u8, 0x10), irq.request);
+    adapter.focusLost(&pad);
+    try std.testing.expectEqual(@as(u8, 0), pad.held);
+}
+
+test "every canonical keyboard key drives its exact P1 line" {
+    const Mapping = struct {
+        usage: u32,
+        button: core.joypad.Button,
+        row_select: u8,
+        line: u8,
+    };
+    const mappings = [_]Mapping{
+        .{ .usage = core.host_adapter.physical_usage_right, .button = .right, .row_select = 0x20, .line = 0x01 },
+        .{ .usage = core.host_adapter.physical_usage_left, .button = .left, .row_select = 0x20, .line = 0x02 },
+        .{ .usage = core.host_adapter.physical_usage_up, .button = .up, .row_select = 0x20, .line = 0x04 },
+        .{ .usage = core.host_adapter.physical_usage_down, .button = .down, .row_select = 0x20, .line = 0x08 },
+        .{ .usage = core.host_adapter.physical_usage_space, .button = .a, .row_select = 0x10, .line = 0x01 },
+        .{ .usage = core.host_adapter.physical_usage_left_alt, .button = .b, .row_select = 0x10, .line = 0x02 },
+        .{ .usage = core.host_adapter.physical_usage_right_control, .button = .select, .row_select = 0x10, .line = 0x04 },
+        .{ .usage = core.host_adapter.physical_usage_enter, .button = .start, .row_select = 0x10, .line = 0x08 },
+    };
+
+    for (mappings) |mapping| {
+        var adapter = core.host_adapter.HostAdapter{};
+        var pad = core.joypad.Joypad{};
+        var irq = core.interrupts.Interrupts{ .request = 0, .enable = 0 };
+        adapter.focusGained();
+        try std.testing.expectEqual(mapping.button, core.host_adapter.buttonForPhysicalUsage(mapping.usage).?);
+        _ = pad.write(mapping.row_select);
+
+        try std.testing.expect(adapter.physicalKey(&pad, &irq, mapping.usage, true, false));
+        try std.testing.expectEqual(@as(u8, 0x0F) & ~mapping.line, pad.read() & 0x0F);
+        try std.testing.expectEqual(@as(u8, 0x10), irq.request);
+
+        irq.writeRequest(0);
+        try std.testing.expect(adapter.physicalKey(&pad, &irq, mapping.usage, true, true));
+        try std.testing.expectEqual(@as(u8, 0), irq.request);
+
+        try std.testing.expect(adapter.physicalKey(&pad, &irq, mapping.usage, false, false));
+        try std.testing.expectEqual(@as(u8, 0x0F), pad.read() & 0x0F);
+        try std.testing.expectEqual(@as(u8, 0), irq.request);
+    }
+}
+
+test "opposing directions remain independently held and released" {
+    var adapter = core.host_adapter.HostAdapter{};
+    var pad = core.joypad.Joypad{};
+    var irq = core.interrupts.Interrupts{ .request = 0, .enable = 0 };
+    adapter.focusGained();
+    _ = pad.write(0x20);
+
+    try std.testing.expect(adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_left, true, false));
+    try std.testing.expect(adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_right, true, false));
+    try std.testing.expectEqual(@as(u8, 0x0C), pad.read() & 0x0F);
+
+    irq.writeRequest(0);
+    try std.testing.expect(adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_left, false, false));
+    try std.testing.expectEqual(@as(u8, 0x0E), pad.read() & 0x0F);
+    try std.testing.expectEqual(@as(u8, 0), irq.request);
+
+    try std.testing.expect(adapter.physicalKey(&pad, &irq, core.host_adapter.physical_usage_right, false, false));
+    try std.testing.expectEqual(@as(u8, 0x0F), pad.read() & 0x0F);
+}
+
+test "selected P1 falling edge wakes STOP while divider and DMA stay frozen" {
+    const allocator = std.testing.allocator;
+    const bytes = try makeRom(allocator, 0x00, 0x00, 0x00, 0x00);
+    defer allocator.free(bytes);
+    var machine = core.machine.Machine.init(.dmg_c, try core.cartridge.Cartridge.init(allocator, bytes));
+    defer machine.deinit();
+
+    machine.write(0xFF00, 0x10);
+    machine.write(0xFF46, 0xC0);
+    machine.tickTcycles(8);
+    try std.testing.expect(machine.dma.active);
+    machine.cpu.stopped = true;
+    const divider = machine.timer.divider_counter;
+    const dma_index = machine.dma.byte_index;
+    machine.tickTcycles(16);
+    try std.testing.expectEqual(divider, machine.timer.divider_counter);
+    try std.testing.expectEqual(dma_index, machine.dma.byte_index);
+
+    machine.setButton(.a, true, false);
+    try std.testing.expect(machine.cpu.stop_wake_requested);
+    const waking = machine.stepCpu();
+    try std.testing.expectEqual(core.cpu.ExecutionKind.stopped, waking.kind);
+    try std.testing.expectEqual(@as(u8, 3), waking.m_cycles);
+    try std.testing.expect(!machine.cpu.stopped);
+    try std.testing.expectEqual(divider +% 8, machine.timer.divider_counter);
 }

@@ -56,6 +56,15 @@
       "categories": ["cpu", "post-boot-profile", "mooneye-executed"]
     },
     {
+      "id": "mooneye-dmg-c-clock-io-31510e1",
+      "path": "Tests/Binaries/Mooneye-mts-20260714-0944-31510e1/mts-20260714-0944-31510e1/acceptance",
+      "kind": "machine_rom_manifest",
+      "selection": "Tests/mooneye_dmg_c_0724.json",
+      "expected_files": 33,
+      "expected_records": 33,
+      "categories": ["machine", "dmg-c", "timer", "interrupt", "halt", "dma", "joypad", "serial", "revision-classified"]
+    },
+    {
       "id": "mealybug-tearoom-70e88fb",
       "path": "Tests/Binaries/Mealybug-Tearoom-70e88fb",
       "kind": "rom_tree",

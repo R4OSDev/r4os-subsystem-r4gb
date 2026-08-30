@@ -1,6 +1,7 @@
 pub const apu = @import("apu.zig");
 pub const bus = @import("bus.zig");
 pub const cartridge = @import("cartridge.zig");
+pub const clock = @import("clock.zig");
 pub const cpu = @import("cpu.zig");
 pub const dma = @import("dma.zig");
 pub const host_adapter = @import("host_adapter.zig");

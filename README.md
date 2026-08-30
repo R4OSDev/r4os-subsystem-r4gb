@@ -12,17 +12,25 @@ host establishes a documented post-boot state and starts a cartridge at
 cartridge header validation decides whether a file can run in DMG mode.
 CGB-only cartridges are rejected.
 
-Version 0.3 provides the complete bounded cartridge front end, DMG address
-bus, and SM83 instruction core. It validates both header and global checksums,
-creates an owned immutable ROM image, models cartridge RAM/RTC register
-windows, and implements ROM-only, MBC1/MBC1M, MBC2, MBC3/MBC30, and MBC5
-banking. Every legal base and CB opcode runs through explicit read, write, and
-idle M-cycle callbacks; illegal opcodes enter a bounded lock state. Known
-unsupported mapper and physical-accessory cartridge types fail separately.
+Version 0.4 provides the complete bounded cartridge front end, DMG address
+bus, SM83 instruction core, and the shared hardware clock for timer,
+interrupt, OAM-DMA, P1 joypad, and serial operation. It validates both header
+and global checksums, creates an owned immutable ROM image, models cartridge
+RAM/RTC register windows, and implements ROM-only, MBC1/MBC1M, MBC2,
+MBC3/MBC30, and MBC5 banking. Every legal base and CB opcode runs through
+explicit read, write, and idle M-cycle callbacks. Host waits and slice sizes
+cannot alter device order or guest results.
+
+DIV/TIMA falling edges, delayed reload writes, IF/IE dispatch retargeting,
+HALT/STOP wake behavior, the two-M-cycle DMA start delay, all 160 DMA bytes,
+the active-low P1 matrix, and the DMG 8192-Hz internal serial clock are modeled
+on the 4.194304-MHz T-cycle axis. A missing serial partner supplies pulled-up
+one bits without blocking; no link or network transport exists in this stage.
 
 Build on Linux with `./Build.sh test` and on Windows with `Build.bat test`.
 `reference-test` additionally validates a local, optional reference tree; use
 `-Dgb-reference-root=<path>` to override its derived workspace location.
+`-Dgb-reference-suite=<id>` selects one manifest suite for diagnosis.
 `cartridge-test -Dgb-cartridge=<path>` validates one explicitly supplied local
 image and proves that probing leaves its bytes unchanged.
 Commercial ROMs, proprietary boot ROMs, and the local `ExFiles` reference
