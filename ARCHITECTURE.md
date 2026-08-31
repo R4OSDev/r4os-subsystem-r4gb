@@ -22,16 +22,19 @@ The component boundaries are:
 | `joypad` | P1 selection and eight active-low buttons | keyboard identities |
 | `serial` | SB/SC and transfer timing seam | link transport |
 | `persistence` | battery SRAM/RTC serialization state | save-state snapshots |
-| `host_adapter` | R4SUBSYS1, R4OS files/window/input/audio translation | guest hardware behavior |
+| `host_adapter` | R4SUBSYS1 and R4OS window/input translation | guest hardware behavior or scheduling |
+| `runtime_adapter` | one bounded guest slice, frame readiness and caller-owned PCM handoff | APU timing or AUDSVC implementation |
 
 `Machine` coordinates components in the stable T-cycle order timer/divider,
-DMA, serial, and the later PPU/APU stages. Every CPU read, write, or idle
-M-cycle advances exactly four T-cycles. Host time is sampled only by the host
-adapter. The guest receives monotonic, pause-corrected time through the common
-subsystem runtime; a host delay grants at most one bounded slice and discarded
-excess time is never replayed as catch-up. Audio uses caller-owned PCM buffers
-and the normal application audio service. Window presentation and keyboard
-mapping use `r4os.subsystem_host`; neither affects emulated time.
+APU, DMA, PPU, and serial. Every CPU read, write, or idle
+M-cycle advances exactly four T-cycles. Host time is sampled only by the common
+runtime and passed through `runtime_adapter`. The guest receives monotonic,
+pause-corrected time through the common
+subsystem runtime; a host delay grants at most one bounded slice per host
+cycle, while remaining cycle debt and whole-instruction overshoot are retained
+without rate drift. Audio uses caller-owned PCM buffers and the normal
+application audio service. Window presentation and keyboard mapping use
+`r4os.subsystem_host`; neither affects emulated time.
 
 ## Boot model
 
@@ -107,6 +110,24 @@ releases all held buttons. SB/SC use the shared post-boot divider phase; an
 internal transfer shifts eight pulled-up input bits and requests Serial, while
 external-clock mode remains pending without host blocking or network access.
 
+## Audio boundary
+
+NR52 owns APU power and channel-status reads. DIV bit 12 falling edges clock
+the eight-step 512-Hz frame sequencer, including the DMG power-on suppression
+case and DIV-write-created edges. Pulse duty/frequency/length/envelope and
+channel-1 sweep, wave fetch/access/retrigger behavior, and the 15/7-bit noise
+LFSR remain private instance state. NR50 and NR51 produce centered left/right
+samples followed by the DMG high-pass response.
+
+The fixed-point sample phase derives exactly 48,000 stereo S16LE frames from
+4,194,304 T-cycles per second. The APU exposes only a bounded PCM ring and
+copies available frames into a caller-owned slice. `runtime_adapter` batches
+complete live quanta, and only the common subsystem runtime may submit them to
+App-Audio/AUDSVC. Feedback resolves accepted, suppressed, or discarded source
+bytes before finite completion. If the backend becomes unavailable, capture
+is disabled and reported as degraded while CPU, timer, PPU, and guest time
+continue through the same bounded slice path.
+
 ## Test boundary
 
 Small original fixtures live in this repository. Large JSON vectors and open
@@ -115,4 +136,7 @@ derives that tree from the repository location or accepts an explicit root;
 missing optional material is reported as `SKIP`, never fetched implicitly.
 The DMG-C machine selection executes 33 revision-applicable Mooneye cases and
 records PPU-dependent and foreign-revision cases separately. Commercial ROMs
-are local manual compatibility inputs only.
+are local manual compatibility inputs only. The APU selection adds both
+DMG-applicable SameSuite DIV/NR52 ROMs; CGB and SGB audio cases remain excluded.
+An independent QEMU WAV gate identifies R4GB's 48-kHz source by its deliberate
+2:1 stereo mix after host resampling and rejects a missing audio quantum.

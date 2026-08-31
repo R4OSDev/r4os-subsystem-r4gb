@@ -22,6 +22,16 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{ .root_module = unit_root });
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
+    // Keep the timing-sensitive APU model tests in the owner gate even though
+    // production imports deliberately do not expose source-local test blocks.
+    const apu_test_root = b.createModule(.{
+        .root_source_file = b.path("src/apu.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const apu_tests = b.addTest(.{ .root_module = apu_test_root });
+    const run_apu_tests = b.addRunArtifact(apu_tests);
+
     const video_host_root = b.createModule(.{
         .root_source_file = b.path("Tests/video_host_test.zig"),
         .target = b.graph.host,
@@ -31,6 +41,16 @@ pub fn build(b: *std.Build) void {
     video_host_root.addImport("r4os", host_r4os);
     const video_host_tests = b.addTest(.{ .root_module = video_host_root });
     const run_video_host_tests = b.addRunArtifact(video_host_tests);
+
+    const runtime_adapter_root = b.createModule(.{
+        .root_source_file = b.path("Tests/runtime_adapter_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    runtime_adapter_root.addImport("core", core);
+    runtime_adapter_root.addImport("r4os", host_r4os);
+    const runtime_adapter_tests = b.addTest(.{ .root_module = runtime_adapter_root });
+    const run_runtime_adapter_tests = b.addRunArtifact(runtime_adapter_tests);
 
     const reference_root = b.createModule(.{
         .root_source_file = b.path("Tests/reference_harness.zig"),
@@ -62,7 +82,9 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Build R4GB and run deterministic owner tests");
     test_step.dependOn(b.getInstallStep());
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_apu_tests.step);
     test_step.dependOn(&run_video_host_tests.step);
+    test_step.dependOn(&run_runtime_adapter_tests.step);
 
     const reference_step = b.step("reference-test", "Validate all available pinned SM83 vectors and open ROM fixtures");
     reference_step.dependOn(&run_references.step);

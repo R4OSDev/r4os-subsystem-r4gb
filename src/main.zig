@@ -26,6 +26,51 @@ const error_read: i32 = 70;
 const error_cartridge: i32 = 71;
 const error_not_implemented: i32 = 72;
 const error_allocator: i32 = 73;
+const error_audio: i32 = 74;
+const error_apu_selftest: i32 = 94;
+// A short finite hardware path keeps the nested QEMU software-emulation gate
+// bounded. The host model test separately proves an exact full second/48 kHz.
+const apu_selftest_duration_ns: u64 = 125 * std.time.ns_per_ms;
+const apu_selftest_frames: usize = (apu_selftest_duration_ns * core.apu.sample_rate) / std.time.ns_per_s;
+const apu_selftest_target_quanta: u16 = @intCast((apu_selftest_frames + runtime_quantum_frames - 1) / runtime_quantum_frames);
+const runtime_quantum_frames: usize = r4os.subsystem_runtime.default_quantum_frames;
+// Nested software emulation can make the first App-Audio IPC round trip take
+// well over the normal two-quantum live catch-up window. Keep the finite gate
+// lossless while still bounding its backlog to substantially less than the
+// 15-second watchdog.
+const apu_selftest_max_catchup_quanta: u16 = 16;
+const audio_service_timeout_ns: u64 = 50 * std.time.ns_per_ms;
+const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
+
+const SelfTestHost = struct {
+    system: *const r4os.r4sys.Context,
+    deadline_tick: u64,
+    timed_out: bool = false,
+
+    fn driver(self: *SelfTestHost) r4os.subsystem_runtime.HostDriver {
+        return .{
+            .context = self,
+            .poll_fn = poll,
+            .present_fn = present,
+            .should_close_fn = shouldClose,
+        };
+    }
+
+    fn poll(_: *anyopaque) r4os.subsystem_runtime.HostPollResult {
+        return .idle;
+    }
+
+    fn present(_: *anyopaque) i32 {
+        return r4os.subsystem_runtime.host_present_unchanged;
+    }
+
+    fn shouldClose(context: *anyopaque) bool {
+        const self: *SelfTestHost = @ptrCast(@alignCast(context));
+        if (self.system.ticks() < self.deadline_tick) return false;
+        self.timed_out = true;
+        return true;
+    }
+};
 
 const CpuSelfTestMemory = struct {
     bytes: [3]u8 = .{ 0x3E, 0x42, 0x00 },
@@ -72,6 +117,7 @@ noinline fn executeMachineProbe(machine: *core.machine.Machine) bool {
 }
 
 pub fn r4_app_main(app: *r4os.App) i32 {
+    if (std.mem.indexOf(u8, app.args(), "/APUTEST") != null) return apuSelfTest(app);
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
     if (app.profile != .desktop) return error_profile;
     const files = app.files() orelse return r4os.abi.err_no_group;
@@ -149,6 +195,139 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     sys.println(@tagName(cart.header.mapper));
     sys.println("R4GB: execution is not implemented in this cartridge build.");
     return error_not_implemented;
+}
+
+fn apuSelfTest(app: *r4os.App) i32 {
+    const runtime_api = r4os.subsystem_runtime;
+    const sys = app.system();
+    const allocator = app.allocator() orelse return error_allocator;
+    const app_audio = app.audio() orelse {
+        sys.println("R4GB APU runtime: FAILED app-audio-unavailable");
+        return error_audio;
+    };
+    const bytes = allocator.alloc(u8, 32 * 1024) catch return error_allocator;
+    defer allocator.free(bytes);
+    makeSelfTestRom(bytes, "R4APUTEST");
+    var machine = core.machine.Machine.init(.dmg_c, core.cartridge.Cartridge.init(allocator, bytes) catch {
+        sys.println("R4GB APU runtime: FAILED cartridge");
+        return error_apu_selftest;
+    });
+    defer machine.deinit();
+    configureApuSelfTestTone(&machine);
+
+    var guest = core.runtime_adapter.Adapter.initFinite(&machine, apu_selftest_duration_ns);
+    // The nested QEMU gate may calculate DMG time slower than the host audio
+    // clock. Pre-roll only this finite diagnostic so the recorded hardware
+    // path measures transport continuity rather than nested-emulation speed.
+    guest.audio_prefill_frames = apu_selftest_frames;
+    var sink_storage = runtime_api.R4AudioSink.initWithTimeouts(app_audio, audio_service_timeout_ns, audio_close_timeout_ns);
+    var queue: [runtime_quantum_frames * apu_selftest_target_quanta * core.apu.sample_bytes]u8 = undefined;
+    var scratch: [runtime_api.default_quantum_frames * core.apu.sample_bytes]u8 = undefined;
+    var runtime = runtime_api.Runtime.init(.{
+        .slice_budget = core.clock.frame_t_cycles,
+        .max_input_events = 1,
+        .max_wait_ticks = runtime_api.default_max_wait_ticks,
+    }, sys.monotonicHz(), sys.ticks(), .{
+        .config = .{
+            .sample_rate = core.apu.sample_rate,
+            .channels = core.apu.channels,
+            .quantum_frames = runtime_api.default_quantum_frames,
+            .target_quanta = apu_selftest_target_quanta,
+            .max_catchup_quanta = apu_selftest_max_catchup_quanta,
+        },
+        .queue_storage = queue[0..],
+        .scratch = scratch[0..],
+        .sink = sink_storage.sink(),
+    }) catch {
+        sys.println("R4GB APU runtime: FAILED runtime-init");
+        return error_apu_selftest;
+    };
+    var host = SelfTestHost{
+        .system = &sys,
+        .deadline_tick = sys.ticks() +| sys.ticksFromMilliseconds(15_000),
+    };
+    const exit_code = runtime.run(&sys, guest.driver(), host.driver());
+    runtime.shutdown();
+
+    const expected_frames: u64 = apu_selftest_frames;
+    const ok = exit_code == 0 and runtime.state == .completed and !guest.audio_degraded and
+        machine.apu.stats.samples_generated == expected_frames and machine.apu.stats.frames_dropped == 0 and
+        machine.apu.queuedFrames() == 0 and guest.transport_pending_bytes == 0 and
+        runtime.audio.stats.submitted_bytes == expected_frames * core.apu.sample_bytes and
+        runtime.audio.stats.suppressed_bytes == 0 and runtime.audio.stats.discarded_bytes == 0 and
+        runtime.audio.stats.write_failures == 0;
+    if (!ok) {
+        sys.write("R4GB APU runtime: FAILED frames=");
+        sys.printU64(machine.apu.stats.samples_generated);
+        sys.write(" submitted=");
+        sys.printU64(runtime.audio.stats.submitted_bytes);
+        sys.write(" drops=");
+        sys.printU64(machine.apu.stats.frames_dropped);
+        sys.write(" suppressed=");
+        sys.printU64(runtime.audio.stats.suppressed_bytes);
+        sys.write(" discarded=");
+        sys.printU64(runtime.audio.stats.discarded_bytes);
+        sys.write(" late=");
+        sys.printU64(runtime.audio.stats.late_resyncs);
+        sys.write(" queued=");
+        sys.printU64(machine.apu.queuedFrames());
+        sys.write(" transport=");
+        sys.printU64(guest.transport_pending_bytes);
+        sys.write(" cycles=");
+        sys.printU64(machine.guest_t_cycles);
+        sys.write(" pending=");
+        sys.printU64(machine.guest_clock.pending_t_cycles);
+        sys.write(" sourceDone=");
+        sys.print(if (guest.source_finished) "1" else "0");
+        sys.write(" timeout=");
+        sys.print(if (host.timed_out) "1" else "0");
+        sys.write(" audio=");
+        sys.print(@tagName(runtime.audio.state));
+        sys.write(" state=");
+        sys.println(@tagName(runtime.state));
+        return error_apu_selftest;
+    }
+    sys.write("R4GB APU runtime: OK rate=48000 channels=2 frames=");
+    sys.printU64(machine.apu.stats.samples_generated);
+    sys.write(" submitted=");
+    sys.printU64(runtime.audio.stats.submitted_bytes);
+    sys.println(" drift=0 drops=0");
+    return 0;
+}
+
+fn configureApuSelfTestTone(machine: *core.machine.Machine) void {
+    machine.write(0xFF26, 0);
+    machine.write(0xFF26, 0x80);
+    // Deliberately use different left/right master volumes. Besides exercising
+    // NR50, this makes the R4GB signal distinguishable from AUDIOD's symmetric
+    // reference tone in the shared QEMU WAV capture.
+    machine.write(0xFF24, 0x73);
+    machine.write(0xFF25, 0x11);
+    machine.write(0xFF11, 0x80);
+    machine.write(0xFF12, 0xF0);
+    machine.write(0xFF13, 0xD6);
+    machine.write(0xFF14, 0x86);
+}
+
+fn makeSelfTestRom(bytes: []u8, title: []const u8) void {
+    const title_len: usize = @min(title.len, 16);
+    @memset(bytes, 0);
+    bytes[0x100] = 0xC3;
+    bytes[0x101] = 0x50;
+    bytes[0x102] = 0x01;
+    @memcpy(bytes[core.cartridge.logo_offset .. core.cartridge.logo_offset + core.cartridge.logo.len], core.cartridge.logo[0..]);
+    @memcpy(bytes[0x134 .. 0x134 + title_len], title[0..title_len]);
+    bytes[0x147] = 0;
+    bytes[0x148] = 0;
+    bytes[0x149] = 0;
+    bytes[0x150] = 0x18;
+    bytes[0x151] = 0xFE;
+    bytes[0x14D] = core.cartridge.headerChecksum(bytes);
+    bytes[0x14E] = 0;
+    bytes[0x14F] = 0;
+    const checksum = core.cartridge.globalChecksum(bytes);
+    bytes[0x14E] = @truncate(checksum >> 8);
+    bytes[0x14F] = @truncate(checksum);
 }
 
 fn selfTest(app: *r4os.App) i32 {

@@ -54,6 +54,11 @@ ROM data is copied into instance-owned immutable storage before use.
 | OAM DMA | Implemented with two-M-cycle start, 160 transfers, restart, DMG blocking and source decoding |
 | P1 joypad | Implemented as two active-low rows with edge IRQ, side-specific HID mapping, repeat suppression and focus release |
 | SB/SC serial | Implemented for DMG internal/external clock state; a disconnected internal transfer receives `0xFF` and never blocks |
+| APU power/frame sequencer | Implemented for NR52, DIV-APU edges, length clocks, trigger/DAC behavior and DMG power-on sequencing |
+| Pulse 1/2 | Implemented with duty, frequency, length, envelopes and channel-1 sweep |
+| Wave channel | Implemented with wave RAM, access windows, restart behavior, length and output level |
+| Noise channel | Implemented with frequency control and 15/7-bit LFSR modes |
+| Stereo output | Implemented with NR50/NR51, DAC centering, high-pass filtering and deterministic 48-kHz S16LE output through App-Audio/AUDSVC |
 
 The revision-pinned Machine gate currently executes 33 DMG-C-applicable
 Mooneye ROMs covering boot phase/MMIO, CPU and stack timing, EI/DI/RETI,
@@ -62,3 +67,11 @@ serial alignment, OAM bytes, complete DMA copy/register behavior, and all DMG
 DMA source regions. Twenty tests whose alignment explicitly requires live LCD
 scanlines are assigned to the PPU stage; nine DMG-0, MGB, or SGB post-boot
 profiles are recorded as foreign to the production DMG-C revision.
+
+Both DMG-applicable SameSuite APU ROMs pass in the Machine harness. Targeted
+unit cases cover register masks, power, trigger, sweep, envelope, wave RAM,
+noise sequences, mixing, sample-rate drift, bounded buffering, and isolated
+audio degradation. The automated QEMU capture additionally requires 6,000
+source frames to reach AUDSVC without loss and detects one continuous,
+non-silent stereo waveform after QEMU's host-rate conversion. CGB- and
+SGB-specific SameSuite audio cases are intentionally outside the DMG target.

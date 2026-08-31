@@ -41,6 +41,7 @@ pub const Machine = struct {
             .dma = .{ .source_high = boot.mmio[0x46], .active_source_high = boot.mmio[0x46] },
             .joypad = .{ .select = boot.mmio[0x00] & 0x30 },
             .serial = .{ .data = boot.mmio[0x01], .control = boot.mmio[0x02] },
+            .apu = apu.Apu.init(boot.mmio[0x10..0x40]),
             .ppu = .{
                 .lcdc = boot.mmio[0x40],
                 .stat = boot.mmio[0x41],
@@ -139,7 +140,7 @@ pub const Machine = struct {
     pub fn stepCpu(self: *Machine) cpu.StepResult {
         const result = self.cpu.step(self.cpuBus(), self.interrupts.pending());
         if (result.kind == .instruction and result.opcode == 0x10) {
-            self.timer.writeDiv();
+            self.writeDivider();
             if ((self.joypad.read() & 0x0F) != 0x0F) self.cpu.requestStopWake();
         }
         return result;
@@ -157,8 +158,15 @@ pub const Machine = struct {
     }
 
     pub fn runHostSlice(self: *Machine, host_nanoseconds: u64) u32 {
-        const budget = self.guest_clock.budget(host_nanoseconds);
-        return if (budget == 0) 0 else self.runTcycles(budget);
+        return self.runHostSliceBounded(host_nanoseconds, self.guest_clock.max_slice_t_cycles);
+    }
+
+    pub fn runHostSliceBounded(self: *Machine, host_nanoseconds: u64, caller_limit: u32) u32 {
+        const budget = self.guest_clock.budgetBounded(host_nanoseconds, caller_limit);
+        if (budget == 0) return 0;
+        const executed = self.runTcycles(budget);
+        self.guest_clock.reconcile(budget, executed);
+        return executed;
     }
 
     pub fn setButton(self: *Machine, button: joypad.Button, down: bool, repeat: bool) void {
@@ -179,10 +187,14 @@ pub const Machine = struct {
     }
 
     fn tickOne(self: *Machine) void {
-        // Stable device order: timer/system divider, DMA, PPU, serial. Every
-        // device consumes the same guest T-cycle and no host clock leaks here.
+        // Stable device order: timer/system divider, APU, DMA, PPU, serial.
+        // Every device consumes the same guest T-cycle and no host clock leaks
+        // here.
         const old_divider = self.timer.divider_counter;
-        if (!self.cpu.stopped and self.timer.tick()) self.interrupts.requestBit(2);
+        if (!self.cpu.stopped) {
+            if (self.timer.tick()) self.interrupts.requestBit(2);
+            self.apu.tick(old_divider, self.timer.divider_counter);
+        }
 
         if (!self.cpu.stopped) {
             if (self.dma.tick()) |source| {
@@ -200,6 +212,12 @@ pub const Machine = struct {
             self.interrupts.requestBit(3);
         }
         self.guest_t_cycles +%= 1;
+    }
+
+    fn writeDivider(self: *Machine) void {
+        const old_divider = self.timer.divider_counter;
+        self.timer.writeDiv();
+        self.apu.dividerChanged(old_divider, self.timer.divider_counter);
     }
 
     fn readDmaSource(self: *Machine, address: u16) u8 {
@@ -222,6 +240,7 @@ pub const Machine = struct {
             0x06 => self.timer.tma,
             0x07 => self.timer.readTac(),
             0x0F => self.interrupts.readRequest(),
+            0x10...0x3F => self.apu.read(offset),
             0x40 => self.ppu.lcdc,
             0x41 => self.ppu.readStat(),
             0x42 => self.ppu.scy,
@@ -246,11 +265,12 @@ pub const Machine = struct {
             },
             0x01 => self.serial.data = value,
             0x02 => self.serial.writeControl(value),
-            0x04 => self.timer.writeDiv(),
+            0x04 => self.writeDivider(),
             0x05 => self.timer.writeTima(value),
             0x06 => self.timer.writeTma(value),
             0x07 => self.timer.writeTac(value),
             0x0F => self.interrupts.writeRequest(value),
+            0x10...0x3F => self.apu.write(offset, value, self.timer.divider_counter),
             0x40 => self.applyPpuEvents(self.ppu.writeLcdc(value)),
             0x41 => self.applyPpuEvents(self.ppu.writeStat(value)),
             0x42 => self.ppu.scy = value,

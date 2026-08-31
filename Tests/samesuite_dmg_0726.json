@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "revision": "dmg-c",
+  "entries": [
+    {
+      "path": "apu/div_write_trigger.gb",
+      "disposition": "required",
+      "reason": "DMG DIV-APU falling-edge sequencing after a divider write"
+    },
+    {
+      "path": "apu/div_write_trigger_10.gb",
+      "disposition": "required",
+      "reason": "DMG NR52 power-on suppression of the first DIV-APU edge"
+    }
+  ]
+}

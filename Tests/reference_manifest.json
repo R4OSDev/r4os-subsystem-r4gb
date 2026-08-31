@@ -97,6 +97,15 @@
       "categories": ["apu", "interrupt", "dma", "ppu"]
     },
     {
+      "id": "samesuite-dmg-apu-f15645f",
+      "path": "Tests/Binaries/Generated/SameSuite-f15645f",
+      "kind": "machine_rom_manifest",
+      "selection": "Tests/samesuite_dmg_0726.json",
+      "expected_files": 2,
+      "expected_records": 2,
+      "categories": ["machine", "dmg-c", "apu", "div-apu", "nr52"]
+    },
+    {
       "id": "rtc3test-v004",
       "path": "Tests/Binaries/rtc3test-v004.gb",
       "kind": "rom_file",

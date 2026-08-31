@@ -326,14 +326,16 @@ fn runMooneyeMachineRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
     var serial_edge_count: usize = 0;
     var last_program_counter: u16 = machine.cpu.registers.pc;
     while (instructions < instruction_budget) : (instructions += 1) {
-        if (machine.cpu.registers.pc >= 0x4000 and
+        const pc = machine.cpu.registers.pc;
+        const at_result_breakpoint = pc < 0x8000 and machine.cartridge.readRom(pc) == 0x40;
+        if (at_result_breakpoint and
             machine.cpu.registers.b == 3 and machine.cpu.registers.c == 5 and
             machine.cpu.registers.d == 8 and machine.cpu.registers.e == 13 and
             machine.cpu.registers.h == 21 and machine.cpu.registers.l == 34)
         {
             return;
         }
-        if (machine.cpu.registers.pc >= 0x4000 and
+        if (at_result_breakpoint and
             machine.cpu.registers.b == 0x42 and machine.cpu.registers.c == 0x42 and
             machine.cpu.registers.d == 0x42 and machine.cpu.registers.e == 0x42 and
             machine.cpu.registers.h == 0x42 and machine.cpu.registers.l == 0x42)
@@ -349,6 +351,9 @@ fn runMooneyeMachineRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
             std.debug.print("R4GB Mooneye HRAM[00..1f]:", .{});
             for (machine.bus.high_ram[0..32]) |value| std.debug.print(" {x:0>2}", .{value});
             std.debug.print("\n", .{});
+            std.debug.print("R4GB machine result WRAM[c000..c07f]:", .{});
+            for (machine.bus.work_ram[0..128]) |value| std.debug.print(" {x:0>2}", .{value});
+            std.debug.print("\n", .{});
             std.debug.print("R4GB Mooneye DIV read phases:", .{});
             for (div_reads[0..div_read_count]) |phase| std.debug.print(" {x:0>4}", .{phase});
             std.debug.print("\n", .{});
@@ -357,7 +362,6 @@ fn runMooneyeMachineRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
             std.debug.print("\n", .{});
             return error.MooneyeMachineFailure;
         }
-        const pc = machine.cpu.registers.pc;
         if (pc < 0x4000) last_program_counter = pc;
         const div_read = machine.cartridge.readRom(pc) == 0xF0 and machine.cartridge.readRom(pc +% 1) == 0x04;
         const old_serial_bits = machine.serial.bits_remaining;
