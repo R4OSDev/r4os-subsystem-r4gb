@@ -12,7 +12,7 @@ host establishes a documented post-boot state and starts a cartridge at
 cartridge header validation decides whether a file can run in DMG mode.
 CGB-only cartridges are rejected.
 
-Version 0.7 provides the complete bounded cartridge front end, DMG address
+Version 0.8 provides the complete bounded cartridge front end, DMG address
 bus, SM83 instruction core, shared hardware clock, dot-clocked PPU, and all
 four DMG audio channels. It validates both header and global checksums,
 creates an owned immutable ROM image, models cartridge RAM/RTC register
@@ -56,5 +56,16 @@ RTC3Test v004 and Mealybug MBC3-RTC execution cover tick, latch, halt, write,
 overflow, and subsecond behavior; host and guest persistence tests cover raw
 SRAM, corrupt input, exclusive ownership, delayed and atomic writes, and
 restart recovery.
+The productive `R4SUBSYS1` path now opens each accepted cartridge as a private
+GUI instance. It runs one 32,768-T-cycle-bounded guest slice per common runtime
+cycle, publishes the native 160x144 Indexed8 surface through
+`r4os.subsystem_host`, and sends PCM only through App-Audio. Resize and
+maximize preserve aspect ratio and letterboxing; unchanged frames are not
+republished. Focus loss releases every held guest button. F5 pauses, F6
+resumes, F8 creates a fresh machine generation, F9 mutes, and F10 unmutes.
+Reset, runtime failure, normal window Close, and repeated Close all converge
+on the same idempotent teardown of audio, video, persistence, machine, and ROM
+ownership. Load, CGB, mapper, accessory, save, and runtime failures remain in
+the cartridge's own window with a concrete diagnosis.
 Commercial ROMs, proprietary boot ROMs, and the local `ExFiles` reference
 tree are never part of this public repository.

@@ -3,6 +3,10 @@ const r4os = @import("r4os");
 const core = @import("core.zig");
 const persistence_r4os = @import("persistence_r4os.zig");
 
+const host_api = r4os.subsystem_host;
+const product_host = core.product_host;
+const runtime_api = r4os.subsystem_runtime;
+
 comptime {
     if (core.host_adapter.physical_usage_up != r4os.abi.physical_key_usage_up or
         core.host_adapter.physical_usage_down != r4os.abi.physical_key_usage_down or
@@ -25,14 +29,16 @@ const error_directory: i32 = 68;
 const error_size: i32 = 69;
 const error_read: i32 = 70;
 const error_cartridge: i32 = 71;
-const error_not_implemented: i32 = 72;
 const error_allocator: i32 = 73;
 const error_audio: i32 = 74;
 const error_save_busy: i32 = 75;
 const error_save_open: i32 = 76;
 const error_save_close: i32 = 77;
+const error_host_video: i32 = 78;
+const error_runtime: i32 = 79;
 const error_apu_selftest: i32 = 94;
 const error_persistence_selftest: i32 = 95;
+const error_host_selftest: i32 = 96;
 // A short finite hardware path keeps the nested QEMU software-emulation gate
 // bounded. The host model test separately proves an exact full second/48 kHz.
 const apu_selftest_duration_ns: u64 = 125 * std.time.ns_per_ms;
@@ -46,6 +52,9 @@ const runtime_quantum_frames: usize = r4os.subsystem_runtime.default_quantum_fra
 const apu_selftest_max_catchup_quanta: u16 = 16;
 const audio_service_timeout_ns: u64 = 50 * std.time.ns_per_ms;
 const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
+const product_audio_target_quanta: u16 = 2;
+const host_selftest_marker_path = "C:\\TEMP\\R4GB.HOST";
+const host_selftest_marker = "R4GB host runtime: OK instances=model-2+window-1 slices=bounded input=physical+focus video=160x144+generation audio=app-audio lifecycle=pause+resume+reset+mute+close resources=closed\r\n";
 
 const SelfTestHost = struct {
     system: *const r4os.r4sys.Context,
@@ -124,124 +133,569 @@ noinline fn executeMachineProbe(machine: *core.machine.Machine) bool {
 pub fn r4_app_main(app: *r4os.App) i32 {
     if (std.mem.indexOf(u8, app.args(), "/APUTEST") != null) return apuSelfTest(app);
     if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
+    if (std.mem.indexOf(u8, app.args(), "/HOSTTEST") != null) return hostSelfTest(app);
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
+    return runProduct(app);
+}
+
+fn runProduct(app: *r4os.App) i32 {
     if (app.profile != .desktop) return error_profile;
-    const files = app.files() orelse return r4os.abi.err_no_group;
     const sys = app.system();
-    const launch = r4os.subsystem_launch.parse(app.args()) catch {
+    const allocator = app.allocator() orelse return error_allocator;
+    const files = app.files() orelse return r4os.abi.err_no_group;
+    const desk = app.desktop() orelse return r4os.abi.err_no_group;
+    const draw = app.drawing() orelse return r4os.abi.err_no_group;
+    const launch = r4os.subsystem_launch.parse(app.args()) catch |fault| {
         sys.println("R4GB: invalid R4SUBSYS1 launch request.");
-        return error_launch;
+        return showStatus(allocator, sys, desk, draw, "R4GB - Startfehler", &.{
+            "Der R4SUBSYS1-Startdatensatz ist ungueltig oder zu gross.",
+            @errorName(fault),
+            "Eine GB-Datei muss ueber Explorer oder Open With gestartet werden.",
+        }, error_launch);
     };
     var path = r4os.AbsoluteFilePath.parse(launch.guest_path) catch {
         sys.println("R4GB: invalid absolute cartridge path.");
-        return error_path;
+        return showStatus(allocator, sys, desk, draw, "R4GB - Startfehler", &.{
+            "Der uebergebene Cartridge-Pfad ist nicht absolut oder ungueltig.",
+            launch.guest_path,
+        }, error_path);
     };
+    const image = loadRomOwned(allocator, &files, &path) catch |fault| {
+        sys.write("R4GB: cartridge load failed: ");
+        sys.println(@errorName(fault));
+        return showStatus(allocator, sys, desk, draw, "R4GB - Ladefehler", &.{
+            loadFailureMessage(fault),
+            launch.guest_path,
+            @errorName(fault),
+        }, loadFailureCode(fault));
+    };
+
+    var save_store = persistence_r4os.Store.init(files);
+    const save_generation = sys.ticks() | 1;
+    var time_context = ProductTimeContext{ .sys = &sys };
+    var guest = product_host.Guest.init(
+        allocator,
+        save_store.backend(),
+        time_context.source(),
+        save_generation,
+    );
+    defer _ = guest.close();
+    guest.openOwned(image) catch |fault| {
+        sys.write("R4GB: cartridge rejected: ");
+        sys.println(@errorName(fault));
+        const code = openFailureCode(fault);
+        return showStatus(allocator, sys, desk, draw, "R4GB - Cartridgefehler", &.{
+            openFailureMessage(fault),
+            launch.guest_path,
+            @errorName(fault),
+        }, code);
+    };
+
+    const surface = guest.initialSurface() catch {
+        _ = guest.close();
+        return showStatus(allocator, sys, desk, draw, "R4GB - Hostfehler", &.{
+            "Die native 160x144-Surface konnte nicht angelegt werden.",
+        }, error_host_video);
+    };
+    var raster_scratch: [host_api.tile_max_pixels]u32 = undefined;
+    var window = host_api.Host.init(desk, draw, surface, raster_scratch[0..]) catch |fault| {
+        _ = guest.close();
+        return showStatus(allocator, sys, desk, draw, "R4GB - Hostfehler", &.{
+            "Der produktive Game-Boy-Fensterhost ist nicht verfuegbar.",
+            @errorName(fault),
+        }, error_host_video);
+    };
+    window.setInputPolicy(.{ .key_text_mode = .key_and_text, .pointer_mode = .ignored });
+    _ = window.setMinimumSize(@intCast(core.ppu.width), @intCast(core.ppu.height));
+    guest.attachVideo(&window.video) catch |fault| {
+        _ = guest.close();
+        return showStatus(allocator, sys, desk, draw, "R4GB - Hostfehler", &.{
+            "Die Cartridge-Surface konnte nicht an das Fenster gebunden werden.",
+            @errorName(fault),
+        }, error_host_video);
+    };
+
+    var audio_sink_storage: runtime_api.R4AudioSink = undefined;
+    var audio_sink: ?runtime_api.AudioSink = null;
+    if (app.audio()) |audio| {
+        audio_sink_storage = runtime_api.R4AudioSink.initWithTimeouts(audio, audio_service_timeout_ns, audio_close_timeout_ns);
+        audio_sink = audio_sink_storage.sink();
+    }
+    var audio_queue: [runtime_api.default_quantum_frames * product_audio_target_quanta * core.apu.sample_bytes]u8 = undefined;
+    var audio_scratch: [runtime_api.default_quantum_frames * core.apu.sample_bytes]u8 = undefined;
+    var runtime = runtime_api.Runtime.init(.{
+        .slice_budget = product_host.slice_budget_t_cycles,
+        .max_input_events = runtime_api.default_max_input_events,
+        .max_wait_ticks = runtime_api.default_max_wait_ticks,
+    }, sys.monotonicHz(), sys.ticks(), .{
+        .config = .{
+            .sample_rate = core.apu.sample_rate,
+            .channels = core.apu.channels,
+            .quantum_frames = runtime_api.default_quantum_frames,
+            .target_quanta = product_audio_target_quanta,
+            .max_catchup_quanta = runtime_api.default_max_catchup_quanta,
+        },
+        .queue_storage = audio_queue[0..],
+        .scratch = audio_scratch[0..],
+        .sink = audio_sink,
+    }) catch |fault| {
+        _ = guest.close();
+        return showStatus(allocator, sys, desk, draw, "R4GB - Hostfehler", &.{
+            "Die kooperative Gastlaufzeit konnte nicht initialisiert werden.",
+            @errorName(fault),
+        }, error_runtime);
+    };
+    var runtime_host = product_host.WindowHost.init(sys, &window, &guest, &runtime);
+    runtime_host.applyTitle();
+
+    sys.write("R4GB: validated DMG cartridge ");
+    sys.println(guest.title());
+    sys.write("R4GB: mapper ");
+    sys.println(@tagName(guest.machine.?.cartridge.header.mapper));
+    if (guest.save_session.?.enabled) {
+        sys.write("R4GB: persistence ");
+        sys.println(core.persistence.save_root);
+    }
+    sys.println("R4GB: host controls F5=pause F6=resume F8=reset F9=mute F10=unmute");
+    const exit_code = runtime.run(&sys, guest.driver(), runtime_host.driver());
+    const runtime_state = runtime.state;
+    const audio_degraded = runtime.audio.state == .degraded;
+    runtime.shutdown();
+    const close_result = guest.close();
+    if (close_result != 0) {
+        sys.println("R4GB: clean persistence close failed.");
+        return error_save_close;
+    }
+    if (runtime_state == .closed) return 0;
+
+    var failure_text: [64]u8 = undefined;
+    const rendered = std.fmt.bufPrint(failure_text[0..], "Laufzeitfehler: {d}", .{exit_code}) catch "Laufzeitfehler";
+    return showStatus(allocator, sys, desk, draw, "R4GB - Laufzeitfehler", &.{
+        "Die emulierte Game-Boy-Instanz wurde kontrolliert beendet.",
+        rendered,
+        if (audio_degraded) "Audio war degradiert; Video und Eingabe liefen unabhaengig weiter." else "Alle Instanzressourcen wurden freigegeben.",
+    }, if (exit_code == 0) error_runtime else exit_code);
+}
+
+const ProductTimeContext = struct {
+    sys: *const r4os.r4sys.Context,
+
+    fn source(self: *ProductTimeContext) product_host.TimeSource {
+        return .{ .context = self, .now_fn = now };
+    }
+
+    fn now(context: *anyopaque) product_host.TimePoint {
+        const self: *ProductTimeContext = @ptrCast(@alignCast(context));
+        return .{
+            .wall_seconds = persistence_r4os.wallSeconds(self.sys.timeState()),
+            .monotonic_ns = self.sys.monotonicNanoseconds() orelse 0,
+        };
+    }
+};
+
+const LoadError = error{
+    Missing,
+    Directory,
+    TooSmall,
+    TooLarge,
+    Metadata,
+    Read,
+    OutOfMemory,
+};
+
+fn loadRomOwned(
+    allocator: std.mem.Allocator,
+    files: *const r4os.app_storage.Files,
+    path: *r4os.AbsoluteFilePath,
+) LoadError![]u8 {
     const info = switch (files.info(path.asZ())) {
         .value => |value| value,
-        .missing => {
-            sys.println("R4GB: cartridge file not found.");
-            return error_missing;
-        },
-        .failure => {
-            sys.println("R4GB: cartridge metadata could not be read.");
-            return error_read;
-        },
+        .missing => return error.Missing,
+        .failure => return error.Metadata,
     };
-    if (info.is_dir != 0) {
-        sys.println("R4GB: cartridge path is a directory.");
-        return error_directory;
-    }
-    const size = std.math.cast(usize, info.size) orelse {
-        sys.println("R4GB: cartridge is too large for this host.");
-        return error_size;
-    };
-    if (size < core.cartridge.header_size) {
-        sys.println("R4GB: cartridge is smaller than a complete header.");
-        return error_cartridge;
-    }
-    if (size > core.cartridge.max_rom_bytes) {
-        sys.println("R4GB: cartridge exceeds the supported 8 MiB DMG limit.");
-        return error_size;
-    }
-    const allocator = app.allocator() orelse {
-        sys.println("R4GB: application memory allocator is unavailable.");
-        return error_allocator;
-    };
-    const image = allocator.alloc(u8, size) catch {
-        sys.println("R4GB: cartridge image allocation failed.");
-        return error_allocator;
-    };
-    var image_owned = true;
-    defer if (image_owned) allocator.free(image);
+    if (info.is_dir != 0) return error.Directory;
+    const size = std.math.cast(usize, info.size) orelse return error.TooLarge;
+    if (size < core.cartridge.header_size) return error.TooSmall;
+    if (size > core.cartridge.max_rom_bytes) return error.TooLarge;
+    const image = allocator.alloc(u8, size) catch return error.OutOfMemory;
+    errdefer allocator.free(image);
     var offset: usize = 0;
     while (offset < image.len) {
         const transferred = switch (files.readAt(path.asZ(), @intCast(offset), image[offset..])) {
             .bytes => |count| count,
-            .end, .failure => {
-                sys.println("R4GB: cartridge header read failed.");
-                return error_read;
-            },
+            .end, .failure => return error.Read,
         };
-        if (transferred == 0 or transferred > image.len - offset) {
-            sys.println("R4GB: cartridge image read was inconsistent.");
-            return error_read;
-        }
+        if (transferred == 0 or transferred > image.len - offset) return error.Read;
         offset += transferred;
     }
-    var cart = core.cartridge.Cartridge.takeOwned(allocator, image) catch |fault| {
-        sys.write("R4GB: cartridge rejected: ");
-        sys.println(@errorName(fault));
-        return error_cartridge;
+    return image;
+}
+
+fn loadFailureMessage(fault: anyerror) []const u8 {
+    return switch (fault) {
+        error.Missing => "Die Cartridge-Datei wurde nicht gefunden.",
+        error.Directory => "Der Cartridge-Pfad bezeichnet ein Verzeichnis.",
+        error.TooSmall => "Die Datei ist kleiner als ein vollstaendiger Game-Boy-Header.",
+        error.TooLarge => "Die Datei ueberschreitet die unterstuetzte DMG-Grenze von 8 MiB.",
+        error.Metadata => "Die Dateiinformationen konnten nicht gelesen werden.",
+        error.Read => "Die Cartridge konnte nicht vollstaendig und unveraendert gelesen werden.",
+        error.OutOfMemory => "Fuer das unveraenderte ROM-Abbild ist nicht genug Speicher verfuegbar.",
+        else => "Die Cartridge konnte nicht geladen werden.",
     };
-    image_owned = false;
-    defer cart.deinit();
-    var save_store = persistence_r4os.Store.init(files);
-    const save_generation = sys.ticks() | 1;
-    const wall_now = persistence_r4os.wallSeconds(sys.timeState());
-    const monotonic_now = sys.monotonicNanoseconds() orelse 0;
-    var save_session = core.persistence.Session.open(
-        &cart,
-        save_store.backend(),
-        save_generation,
-        wall_now,
-        monotonic_now,
-    ) catch |fault| {
-        if (fault == error.Busy) {
-            sys.println("R4GB: this cartridge save is already open for writing.");
-            return error_save_busy;
+}
+
+fn loadFailureCode(fault: anyerror) i32 {
+    return switch (fault) {
+        error.Missing => error_missing,
+        error.Directory => error_directory,
+        error.TooSmall => error_cartridge,
+        error.TooLarge => error_size,
+        error.OutOfMemory => error_allocator,
+        error.Metadata, error.Read => error_read,
+        else => error_read,
+    };
+}
+
+fn openFailureMessage(fault: anyerror) []const u8 {
+    return switch (fault) {
+        error.CgbOnly => "Diese Cartridge benoetigt einen Color Game Boy; R4GB emuliert DMG.",
+        error.UnsupportedMbc6 => "Der Mapper MBC6 ist noch nicht unterstuetzt.",
+        error.UnsupportedTama5 => "Der Mapper TAMA5 ist noch nicht unterstuetzt.",
+        error.UnsupportedHuc3 => "Der Mapper HuC3 ist noch nicht unterstuetzt.",
+        error.UnsupportedMapper, error.UnknownCartridgeType => "Der Cartridge-Mapper ist nicht unterstuetzt.",
+        error.UnsupportedMbc7Accessory => "MBC7-Sensor und Zusatzhardware sind nicht verfuegbar.",
+        error.UnsupportedCameraAccessory => "Die Game-Boy-Kamera ist nicht verfuegbar.",
+        error.UnavailableAccessory => "Die von dieser Cartridge benoetigte Zusatzhardware ist nicht verfuegbar.",
+        error.InvalidLogo, error.InvalidHeaderChecksum, error.InvalidGlobalChecksum => "Die Cartridge-Pruefsummen oder das Nintendo-Logo sind ungueltig.",
+        error.InvalidRomSizeCode, error.InvalidRamSizeCode, error.SizeMismatch, error.InconsistentRam => "Die Cartridge-Groessenangaben sind widerspruechlich.",
+        error.MapperRomTooLarge, error.MapperRamTooLarge => "ROM oder RAM ueberschreitet die Grenze dieses Mappers.",
+        error.CorruptSave => "Die vorhandene SRAM-Datei hat eine ungueltige Groesse.",
+        error.CorruptRtc => "Die vorhandene RTC-Datei ist beschaedigt oder inkompatibel.",
+        error.Busy => "Der Speicherstand dieser Cartridge ist bereits zum Schreiben geoeffnet.",
+        error.Full => "Der Datentraeger fuer den Speicherstand ist voll.",
+        error.Io, error.Unsupported => "Der Speicherort der Cartridge-Daten ist nicht verfuegbar.",
+        error.OutOfMemory => "Fuer die private Game-Boy-Instanz ist nicht genug Speicher verfuegbar.",
+        else => "Die Cartridge wurde durch die DMG-Validierung abgelehnt.",
+    };
+}
+
+fn openFailureCode(fault: anyerror) i32 {
+    return switch (fault) {
+        error.Busy => error_save_busy,
+        error.CorruptSave, error.CorruptRtc, error.Full, error.Io, error.Unsupported => error_save_open,
+        error.OutOfMemory => error_allocator,
+        else => error_cartridge,
+    };
+}
+
+fn showStatus(
+    allocator: std.mem.Allocator,
+    sys: r4os.r4sys.Context,
+    desk: r4os.r4desk.Context,
+    draw: r4os.r4draw.Context,
+    title: [*:0]const u8,
+    lines: []const []const u8,
+    result_code: i32,
+) i32 {
+    _ = allocator;
+    _ = desk.guiSetTitle(title);
+    _ = desk.guiSetMinSize(400, 220);
+    if (!renderStatus(&draw, lines)) return result_code;
+    var activity_sequence: u64 = 0;
+    while (!sys.programShouldClose()) {
+        var event_count: u16 = 0;
+        while (event_count < runtime_api.default_max_input_events) : (event_count += 1) {
+            var event: r4os.abi.GuiEvent = .{};
+            if (desk.guiPollEvent(&event) <= 0) break;
+            if (event.kind == @intFromEnum(r4os.abi.GuiEventKind.close)) return result_code;
+            if (event.kind == @intFromEnum(r4os.abi.GuiEventKind.key_down) and event.key == 27) return result_code;
+            if (event.kind == @intFromEnum(r4os.abi.GuiEventKind.resize)) {
+                if (!renderStatus(&draw, lines)) return result_code;
+            }
         }
-        sys.write("R4GB: cartridge persistence rejected: ");
-        sys.println(@errorName(fault));
-        return error_save_open;
-    };
-    defer if (!save_session.closed) {
-        save_session.close(
-            &cart,
-            save_generation,
-            persistence_r4os.wallSeconds(sys.timeState()),
-            sys.monotonicNanoseconds() orelse monotonic_now,
-        ) catch {};
-    };
-    sys.write("R4GB: validated DMG cartridge ");
-    sys.println(cart.header.titleSlice());
-    sys.write("R4GB: mapper ");
-    sys.println(@tagName(cart.header.mapper));
-    if (save_session.enabled) {
-        sys.write("R4GB: persistence ");
-        sys.println(core.persistence.save_root);
+        if (event_count == runtime_api.default_max_input_events) continue;
+        if (desk.hasFn("desktop_activity_wait")) {
+            var sequence = activity_sequence;
+            const raw = desk.desktopActivityWait(activity_sequence, r4os.abi.io_wait_forever, &sequence);
+            activity_sequence = sequence;
+            if (raw < 0) return result_code;
+        } else {
+            sys.sleepTicks(1);
+        }
     }
-    sys.println("R4GB: execution is not implemented in this cartridge build.");
-    save_session.close(
-        &cart,
-        save_generation,
-        persistence_r4os.wallSeconds(sys.timeState()),
-        sys.monotonicNanoseconds() orelse monotonic_now,
-    ) catch |fault| {
-        sys.write("R4GB: clean persistence close failed: ");
-        sys.println(@errorName(fault));
-        return error_save_close;
+    return result_code;
+}
+
+fn renderStatus(draw: *const r4os.r4draw.Context, lines: []const []const u8) bool {
+    const background: u32 = 0x0014_1820;
+    if (draw.guiClear(background) <= 0) return false;
+    if (!drawStatusLine(draw, 16, 16, "R4GB", 0x00FF_FFFF, background)) return false;
+    var y: i32 = 48;
+    for (lines) |line| {
+        if (!drawStatusLine(draw, 16, y, line, 0x00E0_E0E0, background)) return false;
+        y += 18;
+    }
+    if (!drawStatusLine(draw, 16, y + 18, "Fenster schliessen oder Escape druecken.", 0x0090_A0B0, background)) return false;
+    return draw.guiPresent() >= 0;
+}
+
+fn drawStatusLine(
+    draw: *const r4os.r4draw.Context,
+    x: i32,
+    y: i32,
+    value: []const u8,
+    foreground: u32,
+    background: u32,
+) bool {
+    var storage: [320]u8 = .{0} ** 320;
+    const count = @min(value.len, storage.len - 1);
+    @memcpy(storage[0..count], value[0..count]);
+    return draw.guiDrawText(x, y, @ptrCast(&storage), foreground, background) >= 0;
+}
+
+const HostSelfTestStage = enum {
+    focus_down,
+    focus_up,
+    warm,
+    resume_running,
+    reset,
+    warm_after_reset,
+    mute,
+    unmute,
+    close,
+    done,
+};
+
+const HostSelfTestDriver = struct {
+    base: *product_host.WindowHost,
+    sys: *const r4os.r4sys.Context,
+    guest: *product_host.Guest,
+    stage: HostSelfTestStage = .focus_down,
+    emitted: bool = false,
+    pause_deadline: u64 = 0,
+    watchdog_deadline: u64,
+    timed_out: bool = false,
+
+    fn driver(self: *HostSelfTestDriver) runtime_api.HostDriver {
+        return .{
+            .context = self,
+            .poll_fn = poll,
+            .present_fn = present,
+            .wait_fn = wait,
+            .should_close_fn = shouldClose,
+        };
+    }
+
+    fn poll(context: *anyopaque) runtime_api.HostPollResult {
+        const self: *HostSelfTestDriver = @ptrCast(@alignCast(context));
+        const base_result = self.base.driver().poll();
+        switch (base_result) {
+            .idle => {},
+            else => return base_result,
+        }
+        if (self.emitted) {
+            self.emitted = false;
+            return .idle;
+        }
+        return switch (self.stage) {
+            .focus_down => blk: {
+                self.guest.focusGained(self.sys.ticks());
+                if (!self.guest.physicalKey(core.host_adapter.physical_usage_right, true, false, self.sys.ticks())) {
+                    break :blk .{ .failure = error_host_selftest };
+                }
+                self.stage = .focus_up;
+                self.emitted = true;
+                break :blk .handled;
+            },
+            .focus_up => blk: {
+                if (!self.guest.physicalKey(core.host_adapter.physical_usage_right, false, false, self.sys.ticks())) {
+                    break :blk .{ .failure = error_host_selftest };
+                }
+                self.stage = .warm;
+                self.emitted = true;
+                break :blk .handled;
+            },
+            .warm => blk: {
+                const machine = if (self.guest.machine) |*value| value else break :blk .{ .failure = error_host_selftest };
+                if (machine.guest_t_cycles < @as(u64, core.clock.frame_t_cycles) * 2) break :blk .idle;
+                self.guest.pauseVideo();
+                self.pause_deadline = self.sys.ticks() +| self.sys.ticksFromMilliseconds(20);
+                self.stage = .resume_running;
+                self.emitted = true;
+                break :blk .{ .command = .pause };
+            },
+            .resume_running => blk: {
+                if (self.sys.ticks() < self.pause_deadline) break :blk .idle;
+                self.guest.resumeVideo();
+                self.stage = .reset;
+                self.emitted = true;
+                break :blk .{ .command = .resume_running };
+            },
+            .reset => blk: {
+                self.stage = .warm_after_reset;
+                self.emitted = true;
+                break :blk .{ .command = .reset };
+            },
+            .warm_after_reset => blk: {
+                const machine = if (self.guest.machine) |*value| value else break :blk .{ .failure = error_host_selftest };
+                if (machine.guest_t_cycles < core.clock.frame_t_cycles) break :blk .idle;
+                self.stage = .mute;
+                break :blk .idle;
+            },
+            .mute => blk: {
+                self.stage = .unmute;
+                self.emitted = true;
+                break :blk .{ .command = .mute };
+            },
+            .unmute => blk: {
+                self.stage = .close;
+                self.emitted = true;
+                break :blk .{ .command = .unmute };
+            },
+            .close => blk: {
+                self.guest.focusLost(self.sys.ticks());
+                self.stage = .done;
+                self.emitted = true;
+                break :blk .{ .command = .close };
+            },
+            .done => .idle,
+        };
+    }
+
+    fn present(context: *anyopaque) i32 {
+        const self: *HostSelfTestDriver = @ptrCast(@alignCast(context));
+        return self.base.driver().present();
+    }
+
+    fn wait(context: *anyopaque, timeout_ticks: u64) i32 {
+        const self: *HostSelfTestDriver = @ptrCast(@alignCast(context));
+        const cap = @max(@as(u64, 1), self.sys.ticksFromMilliseconds(1));
+        const bounded = if (timeout_ticks == r4os.abi.io_wait_forever) cap else @min(timeout_ticks, cap);
+        return self.base.driver().wait(bounded) orelse blk: {
+            self.sys.sleepTicks(bounded);
+            break :blk 0;
+        };
+    }
+
+    fn shouldClose(context: *anyopaque) bool {
+        const self: *HostSelfTestDriver = @ptrCast(@alignCast(context));
+        if (self.sys.programShouldClose()) return true;
+        if (self.sys.ticks() < self.watchdog_deadline) return false;
+        self.timed_out = true;
+        return true;
+    }
+};
+
+fn hostSelfTest(app: *r4os.App) i32 {
+    const sys = app.system();
+    const allocator = app.allocator() orelse return error_allocator;
+    const files = app.files() orelse return r4os.abi.err_no_group;
+    const desk = app.desktop() orelse return r4os.abi.err_no_group;
+    const draw = app.drawing() orelse return r4os.abi.err_no_group;
+    const app_audio = app.audio() orelse {
+        sys.println("R4GB host runtime: FAILED app-audio-unavailable");
+        return error_host_selftest;
     };
-    return error_not_implemented;
+    const image = allocator.alloc(u8, 32 * 1024) catch return error_allocator;
+    makeSelfTestRom(image, "R4HOSTTEST");
+
+    var save_store = persistence_r4os.Store.init(files);
+    const initial_generation = sys.ticks() | 1;
+    var time_context = ProductTimeContext{ .sys = &sys };
+    var guest = product_host.Guest.init(allocator, save_store.backend(), time_context.source(), initial_generation);
+    defer _ = guest.close();
+    guest.openOwned(image) catch |fault| {
+        sys.write("R4GB host runtime: FAILED open=");
+        sys.println(@errorName(fault));
+        return error_host_selftest;
+    };
+    configureApuSelfTestTone(&guest.machine.?);
+
+    const surface = guest.initialSurface() catch {
+        sys.println("R4GB host runtime: FAILED surface");
+        return error_host_selftest;
+    };
+    var raster_scratch: [host_api.tile_max_pixels]u32 = undefined;
+    var window = host_api.Host.init(desk, draw, surface, raster_scratch[0..]) catch {
+        sys.println("R4GB host runtime: FAILED window");
+        return error_host_selftest;
+    };
+    window.setInputPolicy(.{ .key_text_mode = .key_and_text, .pointer_mode = .ignored });
+    _ = window.setMinimumSize(@intCast(core.ppu.width), @intCast(core.ppu.height));
+    guest.attachVideo(&window.video) catch {
+        sys.println("R4GB host runtime: FAILED video-bind");
+        return error_host_selftest;
+    };
+
+    var sink_storage = runtime_api.R4AudioSink.initWithTimeouts(app_audio, audio_service_timeout_ns, audio_close_timeout_ns);
+    var audio_queue: [runtime_api.default_quantum_frames * product_audio_target_quanta * core.apu.sample_bytes]u8 = undefined;
+    var audio_scratch: [runtime_api.default_quantum_frames * core.apu.sample_bytes]u8 = undefined;
+    var runtime = runtime_api.Runtime.init(.{
+        .slice_budget = product_host.slice_budget_t_cycles,
+        .max_input_events = runtime_api.default_max_input_events,
+        .max_wait_ticks = runtime_api.default_max_wait_ticks,
+    }, sys.monotonicHz(), sys.ticks(), .{
+        .config = .{
+            .sample_rate = core.apu.sample_rate,
+            .channels = core.apu.channels,
+            .quantum_frames = runtime_api.default_quantum_frames,
+            .target_quanta = product_audio_target_quanta,
+            .max_catchup_quanta = runtime_api.default_max_catchup_quanta,
+        },
+        .queue_storage = audio_queue[0..],
+        .scratch = audio_scratch[0..],
+        .sink = sink_storage.sink(),
+    }) catch {
+        sys.println("R4GB host runtime: FAILED runtime-init");
+        return error_host_selftest;
+    };
+    var window_host = product_host.WindowHost.init(sys, &window, &guest, &runtime);
+    window_host.applyTitle();
+    var scripted_host = HostSelfTestDriver{
+        .base = &window_host,
+        .sys = &sys,
+        .guest = &guest,
+        .watchdog_deadline = sys.ticks() +| sys.ticksFromMilliseconds(10_000),
+    };
+    const exit_code = runtime.run(&sys, guest.driver(), scripted_host.driver());
+    const generation = guest.generation;
+    const maximum_slice = guest.stats.maximum_slice_operations;
+    const published_frames = window.video.stats.published_frames;
+    const audio_writes = runtime.audio.stats.writes;
+    const audio_degraded = runtime.audio.state == .degraded;
+    runtime.shutdown();
+    const close_result = guest.close();
+    const ok = exit_code == 0 and runtime.state == .closed and scripted_host.stage == .done and !scripted_host.timed_out and
+        runtime.stats.pauses == 1 and runtime.stats.resumes == 1 and runtime.stats.resets == 1 and
+        generation == initial_generation + 1 and maximum_slice <= product_host.slice_budget_t_cycles + 24 and
+        published_frames != 0 and audio_writes != 0 and !audio_degraded and
+        guest.input.input_events == 2 and !guest.input.focused and close_result == 0 and !guest.resourcesOpen() and
+        guest.stats.machine_creates == 2 and guest.stats.machine_destroys == 2 and guest.stats.rom_releases == 1;
+    if (!ok) {
+        sys.write("R4GB host runtime: FAILED state=");
+        sys.write(@tagName(runtime.state));
+        sys.write(" stage=");
+        sys.write(@tagName(scripted_host.stage));
+        sys.write(" slices=");
+        sys.printU64(runtime.stats.slices);
+        sys.write(" max=");
+        sys.printU64(maximum_slice);
+        sys.write(" frames=");
+        sys.printU64(published_frames);
+        sys.write(" writes=");
+        sys.printU64(audio_writes);
+        sys.write(" timeout=");
+        sys.print(if (scripted_host.timed_out) "1" else "0");
+        sys.write(" audio=");
+        sys.println(if (audio_degraded) "degraded" else "ok");
+        return error_host_selftest;
+    }
+    if (sys.fileWrite(host_selftest_marker_path, host_selftest_marker) != @as(i32, @intCast(host_selftest_marker.len))) {
+        sys.println("R4GB host runtime: FAILED marker-write");
+        return error_host_selftest;
+    }
+    sys.write(host_selftest_marker);
+    return 0;
 }
 
 fn persistenceSelfTest(app: *r4os.App) i32 {
@@ -337,7 +791,6 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
 }
 
 fn apuSelfTest(app: *r4os.App) i32 {
-    const runtime_api = r4os.subsystem_runtime;
     const sys = app.system();
     const allocator = app.allocator() orelse return error_allocator;
     const app_audio = app.audio() orelse {

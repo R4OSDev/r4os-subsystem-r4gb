@@ -25,6 +25,7 @@ The component boundaries are:
 | `persistence_r4os` | R4SYS-backed leases, exact reads and same-directory atomic replacement | cartridge or emulated-time behavior |
 | `host_adapter` | R4SUBSYS1 and R4OS window/input translation | guest hardware behavior or scheduling |
 | `runtime_adapter` | one bounded guest slice, frame readiness and caller-owned PCM handoff | APU timing or AUDSVC implementation |
+| `product_host` | one launch's ROM, machine, save lease, generation-safe surface, explicit host actions and idempotent teardown | global emulator state or direct kernel/audio access |
 
 `Machine` coordinates components in the stable T-cycle order timer/divider,
 APU, DMA, PPU, and serial. Every CPU read, write, or idle
@@ -36,6 +37,18 @@ cycle, while remaining cycle debt and whole-instruction overshoot are retained
 without rate drift. Audio uses caller-owned PCM buffers and the normal
 application audio service. Window presentation and keyboard mapping use
 `r4os.subsystem_host`; neither affects emulated time.
+
+The productive window driver drains a bounded ordered event batch and then
+lets `r4os.subsystem_runtime` execute exactly one guest slice of at most 32,768
+requested T-cycles. F5 Pause and F6 Resume are distinct commands, as are F9
+Mute and F10 Unmute; no toggle state is inferred from key repetition. F8 Reset
+flushes dirty battery data, constructs a new machine from the retained
+immutable ROM, transfers only battery-backed state, drops old PCM, and binds a
+strictly newer video generation before execution resumes. Window Close,
+runtime failure, reset failure, and normal unwinding share the same
+idempotent resource release. The save-lease generation remains stable across
+a reset, so a video generation can never accidentally invalidate persistence
+ownership.
 
 ## Boot model
 
@@ -55,6 +68,12 @@ does not imply CGB-only hardware, and a
 `.gb` filename cannot bypass a CGB-only header. Unsupported mappers and pure
 CGB images fail before a machine is created. The input ROM buffer is never
 modified.
+
+Product errors are rendered in the launching GUI instance rather than being
+reduced to a terminal-only code. The status names the failing path and the
+specific launch, file, checksum, CGB, mapper, accessory, persistence, or
+runtime condition. Resources already acquired before a host error are closed
+before the diagnostic event loop begins.
 
 The cartridge owns its complete ROM allocation as a read-only slice and its
 SHA-256 identity. Mapper register writes can only select bounded ROM, SRAM,
@@ -177,3 +196,10 @@ conditions; the QEMU product-path test verifies exact SRAM/RTC restart,
 exclusive ownership and atomic replacement through the real guest filesystem.
 An independent QEMU WAV gate identifies R4GB's 48-kHz source by its deliberate
 2:1 stereo mix after host resampling and rejects a missing audio quantum.
+The product-host component gate additionally interleaves two private machines,
+including permitted same-ROM non-battery instances, and checks isolated RAM,
+focus, pause-corrected time, bounded slices, fresh reset video/PCM, continued
+progress after peer Close, and teardown balance. A real headless R4OS window
+gate exercises physical input, presentation, App-Audio, Pause/Resume, Reset,
+Mute/Unmute, Close, and the same resource owner path without requiring visual
+inspection.

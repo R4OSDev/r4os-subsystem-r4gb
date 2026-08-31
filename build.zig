@@ -61,6 +61,16 @@ pub fn build(b: *std.Build) void {
     const persistence_tests = b.addTest(.{ .root_module = persistence_root });
     const run_persistence_tests = b.addRunArtifact(persistence_tests);
 
+    const product_host_root = b.createModule(.{
+        .root_source_file = b.path("Tests/product_host_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    product_host_root.addImport("core", core);
+    product_host_root.addImport("r4os", host_r4os);
+    const product_host_tests = b.addTest(.{ .root_module = product_host_root });
+    const run_product_host_tests = b.addRunArtifact(product_host_tests);
+
     const reference_root = b.createModule(.{
         .root_source_file = b.path("Tests/reference_harness.zig"),
         .target = b.graph.host,
@@ -95,6 +105,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_video_host_tests.step);
     test_step.dependOn(&run_runtime_adapter_tests.step);
     test_step.dependOn(&run_persistence_tests.step);
+    test_step.dependOn(&run_product_host_tests.step);
 
     const reference_step = b.step("reference-test", "Validate all available pinned SM83 vectors and open ROM fixtures");
     reference_step.dependOn(&run_references.step);

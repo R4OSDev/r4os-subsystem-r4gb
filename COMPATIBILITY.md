@@ -16,6 +16,27 @@
   component so a later TCP/IP transport can attach without changing the CPU.
 - Initial input: keyboard only. Arrows=D-pad, Enter=Start, right Ctrl=Select,
   left Alt=B, Space=A.
+- Explicit host actions: F5=Pause, F6=Resume, F8=Reset, F9=Mute,
+  F10=Unmute. These usages do not overlap guest controls and are not toggles.
+
+## Product host
+
+- Explorer/Open-With launches use the bounded `R4SUBSYS1` record and require
+  one absolute guest path. The complete file is read once into immutable,
+  instance-owned storage and validated before execution.
+- Every launch owns an independent Machine, input state, 160x144 Indexed8
+  surface, PCM stream state, pacing clock, and persistence session.
+- The common subsystem runtime executes one 32,768-T-cycle-bounded slice per
+  host cycle. Paused host time never becomes guest catch-up debt.
+- Resize, maximize and restore are aspect-correct; letterbox areas remain host
+  space. Only complete changed frames produce Full or Damage presentation.
+- Audio service failure degrades only audio and is reported in the title;
+  CPU, video, input, guest time, and clean Close continue.
+- Reset creates a new machine and video generation from the immutable ROM,
+  keeps only battery-backed SRAM/RTC, and cannot replay stale video or PCM.
+- Non-battery cartridges, including two copies of the same ROM, may run in
+  parallel. A battery-backed ROM retains its single-writer save lease and a
+  conflicting writer receives a concrete Busy diagnosis.
 
 ## Cartridge hardware
 
