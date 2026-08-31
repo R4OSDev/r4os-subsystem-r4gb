@@ -52,6 +52,15 @@ pub fn build(b: *std.Build) void {
     const runtime_adapter_tests = b.addTest(.{ .root_module = runtime_adapter_root });
     const run_runtime_adapter_tests = b.addRunArtifact(runtime_adapter_tests);
 
+    const persistence_root = b.createModule(.{
+        .root_source_file = b.path("Tests/persistence_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    persistence_root.addImport("core", core);
+    const persistence_tests = b.addTest(.{ .root_module = persistence_root });
+    const run_persistence_tests = b.addRunArtifact(persistence_tests);
+
     const reference_root = b.createModule(.{
         .root_source_file = b.path("Tests/reference_harness.zig"),
         .target = b.graph.host,
@@ -85,6 +94,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_apu_tests.step);
     test_step.dependOn(&run_video_host_tests.step);
     test_step.dependOn(&run_runtime_adapter_tests.step);
+    test_step.dependOn(&run_persistence_tests.step);
 
     const reference_step = b.step("reference-test", "Validate all available pinned SM83 vectors and open ROM fixtures");
     reference_step.dependOn(&run_references.step);

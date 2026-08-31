@@ -1,6 +1,7 @@
 const std = @import("std");
 const r4os = @import("r4os");
 const core = @import("core.zig");
+const persistence_r4os = @import("persistence_r4os.zig");
 
 comptime {
     if (core.host_adapter.physical_usage_up != r4os.abi.physical_key_usage_up or
@@ -27,7 +28,11 @@ const error_cartridge: i32 = 71;
 const error_not_implemented: i32 = 72;
 const error_allocator: i32 = 73;
 const error_audio: i32 = 74;
+const error_save_busy: i32 = 75;
+const error_save_open: i32 = 76;
+const error_save_close: i32 = 77;
 const error_apu_selftest: i32 = 94;
+const error_persistence_selftest: i32 = 95;
 // A short finite hardware path keeps the nested QEMU software-emulation gate
 // bounded. The host model test separately proves an exact full second/48 kHz.
 const apu_selftest_duration_ns: u64 = 125 * std.time.ns_per_ms;
@@ -118,6 +123,7 @@ noinline fn executeMachineProbe(machine: *core.machine.Machine) bool {
 
 pub fn r4_app_main(app: *r4os.App) i32 {
     if (std.mem.indexOf(u8, app.args(), "/APUTEST") != null) return apuSelfTest(app);
+    if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
     if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
     if (app.profile != .desktop) return error_profile;
     const files = app.files() orelse return r4os.abi.err_no_group;
@@ -189,12 +195,145 @@ pub fn r4_app_main(app: *r4os.App) i32 {
     };
     image_owned = false;
     defer cart.deinit();
+    var save_store = persistence_r4os.Store.init(files);
+    const save_generation = sys.ticks() | 1;
+    const wall_now = persistence_r4os.wallSeconds(sys.timeState());
+    const monotonic_now = sys.monotonicNanoseconds() orelse 0;
+    var save_session = core.persistence.Session.open(
+        &cart,
+        save_store.backend(),
+        save_generation,
+        wall_now,
+        monotonic_now,
+    ) catch |fault| {
+        if (fault == error.Busy) {
+            sys.println("R4GB: this cartridge save is already open for writing.");
+            return error_save_busy;
+        }
+        sys.write("R4GB: cartridge persistence rejected: ");
+        sys.println(@errorName(fault));
+        return error_save_open;
+    };
+    defer if (!save_session.closed) {
+        save_session.close(
+            &cart,
+            save_generation,
+            persistence_r4os.wallSeconds(sys.timeState()),
+            sys.monotonicNanoseconds() orelse monotonic_now,
+        ) catch {};
+    };
     sys.write("R4GB: validated DMG cartridge ");
     sys.println(cart.header.titleSlice());
     sys.write("R4GB: mapper ");
     sys.println(@tagName(cart.header.mapper));
+    if (save_session.enabled) {
+        sys.write("R4GB: persistence ");
+        sys.println(core.persistence.save_root);
+    }
     sys.println("R4GB: execution is not implemented in this cartridge build.");
+    save_session.close(
+        &cart,
+        save_generation,
+        persistence_r4os.wallSeconds(sys.timeState()),
+        sys.monotonicNanoseconds() orelse monotonic_now,
+    ) catch |fault| {
+        sys.write("R4GB: clean persistence close failed: ");
+        sys.println(@errorName(fault));
+        return error_save_close;
+    };
     return error_not_implemented;
+}
+
+fn persistenceSelfTest(app: *r4os.App) i32 {
+    runPersistenceSelfTest(app) catch |fault| {
+        const sys = app.system();
+        sys.write("R4GB persistence runtime: FAILED ");
+        sys.println(@errorName(fault));
+        return error_persistence_selftest;
+    };
+    app.system().println("R4GB persistence runtime: OK sram=8192 rtc=1 lock=exclusive atomic=1");
+    return 0;
+}
+
+fn runPersistenceSelfTest(app: *r4os.App) !void {
+    const allocator = app.allocator() orelse return error.AllocatorUnavailable;
+    const files = app.files() orelse return error.FilesUnavailable;
+    const sys = app.system();
+    const bytes = try allocator.alloc(u8, 32 * 1024);
+    defer allocator.free(bytes);
+    makeSelfTestRom(bytes, "R4SAVETEST");
+    bytes[0x147] = 0x10;
+    bytes[0x149] = 0x02;
+    finalizeSelfTestRom(bytes);
+
+    var first_cart = try core.cartridge.Cartridge.init(allocator, bytes);
+    defer first_cart.deinit();
+    var first_store = persistence_r4os.Store.init(files);
+    first_store.removeTestFiles(&first_cart.rom_digest);
+    defer first_store.removeTestFiles(&first_cart.rom_digest);
+    const generation = (sys.ticks() | 1) +| 2;
+    const wall = persistence_r4os.wallSeconds(sys.timeState());
+    const monotonic = sys.monotonicNanoseconds() orelse 0;
+    var first_session = try core.persistence.Session.open(&first_cart, first_store.backend(), generation, wall, monotonic);
+    defer if (!first_session.closed) {
+        first_session.close(&first_cart, generation, wall, monotonic) catch {};
+    };
+
+    first_cart.writeControl(0x0000, 0x0A);
+    for (first_cart.external_ram, 0..) |_, index| {
+        first_cart.writeExternal(@intCast(0xA000 + index), @truncate(index *% 37 +% 11));
+    }
+    first_cart.writeControl(0x4000, 0x08);
+    first_cart.writeExternal(0xA000, 58);
+    first_cart.writeControl(0x4000, 0x09);
+    first_cart.writeExternal(0xA000, 59);
+    first_cart.writeControl(0x4000, 0x0A);
+    first_cart.writeExternal(0xA000, 23);
+    first_cart.writeControl(0x4000, 0x0B);
+    first_cart.writeExternal(0xA000, 0xFE);
+    first_cart.writeControl(0x4000, 0x0C);
+    first_cart.writeExternal(0xA000, 0x41); // day bit 8 + halt
+
+    var competing_cart = try core.cartridge.Cartridge.init(allocator, bytes);
+    defer competing_cart.deinit();
+    var competing_store = persistence_r4os.Store.init(files);
+    const contention = core.persistence.Session.open(&competing_cart, competing_store.backend(), generation + 1, wall, monotonic);
+    if (contention) |opened| {
+        var unexpected = opened;
+        unexpected.close(&competing_cart, generation + 1, wall, monotonic) catch {};
+        return error.ExclusiveWriterAcceptedTwice;
+    } else |fault| {
+        if (fault != error.Busy) return fault;
+    }
+    try first_session.close(&first_cart, generation, wall, monotonic);
+
+    var reopened_cart = try core.cartridge.Cartridge.init(allocator, bytes);
+    defer reopened_cart.deinit();
+    var reopened_session = try core.persistence.Session.open(&reopened_cart, competing_store.backend(), generation + 2, wall, monotonic);
+    defer if (!reopened_session.closed) {
+        reopened_session.close(&reopened_cart, generation + 2, wall, monotonic) catch {};
+    };
+    for (reopened_cart.external_ram, 0..) |value, index| {
+        if (value != @as(u8, @truncate(index *% 37 +% 11))) return error.SramMismatch;
+    }
+    const rtc = reopened_cart.mapper.rtc;
+    if (rtc.seconds != 58 or rtc.minutes != 59 or rtc.hours != 23 or rtc.day_low != 0xFE or rtc.day_high != 0x41)
+        return error.RtcMismatch;
+    reopened_cart.writeControl(0x0000, 0x0A);
+    reopened_cart.writeControl(0x4000, 0);
+    reopened_cart.writeExternal(0xA000, 0xA7);
+    try reopened_session.close(&reopened_cart, generation + 2, wall, monotonic);
+
+    var final_cart = try core.cartridge.Cartridge.init(allocator, bytes);
+    defer final_cart.deinit();
+    var final_store = persistence_r4os.Store.init(files);
+    var final_session = try core.persistence.Session.open(&final_cart, final_store.backend(), generation + 3, wall, monotonic);
+    defer if (!final_session.closed) {
+        final_session.close(&final_cart, generation + 3, wall, monotonic) catch {};
+    };
+    if (final_cart.external_ram[0] != 0xA7 or final_cart.external_ram[1] != @as(u8, @truncate(1 * 37 + 11)))
+        return error.AtomicReplacementMismatch;
+    try final_session.close(&final_cart, generation + 3, wall, monotonic);
 }
 
 fn apuSelfTest(app: *r4os.App) i32 {
@@ -322,6 +461,10 @@ fn makeSelfTestRom(bytes: []u8, title: []const u8) void {
     bytes[0x149] = 0;
     bytes[0x150] = 0x18;
     bytes[0x151] = 0xFE;
+    finalizeSelfTestRom(bytes);
+}
+
+fn finalizeSelfTestRom(bytes: []u8) void {
     bytes[0x14D] = core.cartridge.headerChecksum(bytes);
     bytes[0x14E] = 0;
     bytes[0x14F] = 0;

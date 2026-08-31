@@ -7,7 +7,7 @@ const max_vector_bytes: usize = 4 * 1024 * 1024;
 // harness ceiling sits above the largest legal 8 MiB Game Boy image.
 const max_rom_bytes: usize = 16 * 1024 * 1024;
 
-const SuiteKind = enum { sm83_json, rom_tree, rom_file, cartridge_tree, cpu_rom_file, machine_rom_manifest, ppu_screenshot_manifest };
+const SuiteKind = enum { sm83_json, rom_tree, rom_file, cartridge_tree, cpu_rom_file, machine_rom_file, machine_rom_manifest, ppu_screenshot_manifest, rtc3_machine };
 
 const Suite = struct {
     id: []const u8,
@@ -75,8 +75,10 @@ fn run(init: std.process.Init) !void {
             .rom_file => try scanRomFile(allocator, io, cwd, suite_path),
             .cartridge_tree => try scanCartridgeTree(allocator, io, cwd, suite_path),
             .cpu_rom_file => try scanCpuRomFile(allocator, io, cwd, suite_path),
+            .machine_rom_file => try scanMachineRomFile(allocator, io, cwd, suite_path),
             .machine_rom_manifest => try scanMachineRomManifest(allocator, io, cwd, suite_path, suite.selection orelse return error.MissingSelectionManifest, case_filter),
             .ppu_screenshot_manifest => try scanPpuScreenshotManifest(allocator, io, cwd, suite_path, suite.selection orelse return error.MissingSelectionManifest, case_filter),
+            .rtc3_machine => try scanRtc3Machine(allocator, io, cwd, suite_path),
         };
         const expected_files = if (case_filter == null) suite.expected_files else 1;
         const expected_records = if (case_filter == null) suite.expected_records else 1;
@@ -175,6 +177,105 @@ fn scanCpuRomFile(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, pat
     var result = Summary{ .files = 1, .records = 1 };
     mixDigest(&result.digest, std.fs.path.basename(path), bytes);
     return result;
+}
+
+fn scanMachineRomFile(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) !Summary {
+    const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
+    defer allocator.free(bytes);
+    try validateRomIdentity(bytes);
+    try runMooneyeMachineRom(allocator, bytes);
+    var result = Summary{ .files = 1, .records = 1 };
+    mixDigest(&result.digest, std.fs.path.basename(path), bytes);
+    return result;
+}
+
+fn scanRtc3Machine(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) !Summary {
+    const bytes = try cwd.readFileAlloc(io, path, allocator, .limited(max_rom_bytes));
+    defer allocator.free(bytes);
+    try validateRomIdentity(bytes);
+
+    var machine = core.machine.Machine.init(.dmg_c, try core.cartridge.Cartridge.init(allocator, bytes));
+    defer machine.deinit();
+    try waitRtc3Menu(&machine);
+
+    var completed: usize = 0;
+    while (completed < 3) : (completed += 1) {
+        if (completed != 0) try pressRtc3Button(&machine, .down);
+        try pressRtc3Button(&machine, .a);
+        try waitRtc3Return(&machine, completed);
+        if (rtc3HasRedResult(&machine)) {
+            std.debug.print("R4GB RTC3Test failure: suite={d} cycles={d}\n", .{ completed, machine.guest_t_cycles });
+            return error.Rtc3TestFailure;
+        }
+        try pressRtc3Button(&machine, .a);
+        if (completed + 1 < 3) try waitRtc3Menu(&machine);
+    }
+
+    var result = Summary{ .files = 1, .records = completed };
+    mixDigest(&result.digest, std.fs.path.basename(path), bytes);
+    return result;
+}
+
+const rtc3_map_offset: usize = 0x1C00;
+const rtc3_menu_title = [_]u8{ 0x16, 0x0B, 0x0C, 0x03, 0x3F, 0x1B, 0x1D, 0x0C }; // "MBC3 RTC"
+const rtc3_return = [_]u8{ 0xC1, 0x3F, 0x1B, 0x28, 0x37, 0x38, 0x35, 0x31 }; // "* Return"
+
+fn waitRtc3Menu(machine: *core.machine.Machine) !void {
+    const offset = rtc3_map_offset + 2;
+    try runRtc3UntilTiles(machine, offset, &rtc3_menu_title, 10 * core.clock.frequency_hz, error.Rtc3MenuTimeout);
+}
+
+fn waitRtc3Return(machine: *core.machine.Machine, suite: usize) !void {
+    const offset = rtc3_map_offset + 17 * 32 + 6;
+    runRtc3UntilTiles(machine, offset, &rtc3_return, 180 * core.clock.frequency_hz, error.Rtc3SuiteTimeout) catch |fault| {
+        std.debug.print(
+            "R4GB RTC3Test timeout: suite={d} pc={x:0>4} cycles={d} rtc={d:0>2}:{d:0>2}:{d:0>2} day={d}\n",
+            .{ suite, machine.cpu.registers.pc, machine.guest_t_cycles, machine.cartridge.mapper.rtc.hours, machine.cartridge.mapper.rtc.minutes, machine.cartridge.mapper.rtc.seconds, (@as(u16, machine.cartridge.mapper.rtc.day_high & 1) << 8) | machine.cartridge.mapper.rtc.day_low },
+        );
+        return fault;
+    };
+}
+
+fn runRtc3UntilTiles(
+    machine: *core.machine.Machine,
+    offset: usize,
+    expected: []const u8,
+    cycle_budget: u64,
+    timeout_fault: anyerror,
+) !void {
+    const start = machine.guest_t_cycles;
+    var instructions: usize = 0;
+    while (machine.guest_t_cycles - start < cycle_budget) : (instructions += 1) {
+        if ((instructions & 0x7FF) == 0 and std.mem.eql(u8, machine.ppu.vram[offset .. offset + expected.len], expected)) return;
+        const execution = machine.stepCpu();
+        if (execution.kind == .illegal) return error.Rtc3IllegalOpcode;
+    }
+    return timeout_fault;
+}
+
+fn pressRtc3Button(machine: *core.machine.Machine, button: core.joypad.Button) !void {
+    machine.setButton(button, true, false);
+    try runRtc3Cycles(machine, 2 * core.clock.frame_t_cycles);
+    machine.setButton(button, false, false);
+    try runRtc3Cycles(machine, 2 * core.clock.frame_t_cycles);
+}
+
+fn runRtc3Cycles(machine: *core.machine.Machine, count: u32) !void {
+    const start = machine.guest_t_cycles;
+    while (machine.guest_t_cycles - start < count) {
+        const execution = machine.stepCpu();
+        if (execution.kind == .illegal) return error.Rtc3IllegalOpcode;
+    }
+}
+
+fn rtc3HasRedResult(machine: *const core.machine.Machine) bool {
+    // Colored result text occupies rows 2 through 16. Values $80..$BF are
+    // ordinary font tiles with RTC3Test's red bit; $FF is an unused cell and
+    // $C0..$C4 are uncolored UI symbols.
+    for (machine.ppu.vram[rtc3_map_offset + 2 * 32 .. rtc3_map_offset + 17 * 32]) |tile| {
+        if (tile >= 0x80 and tile <= 0xBF) return true;
+    }
+    return false;
 }
 
 const MachineDisposition = enum { required, deferred_ppu, foreign_revision };
@@ -318,7 +419,7 @@ fn runMooneyeMachineRom(allocator: std.mem.Allocator, bytes: []const u8) !void {
     defer machine.deinit();
     // A live PPU now carries Mooneye's reporting library through its two
     // VBlanks; result registers are observed at the suite's LD B,B breakpoint.
-    const instruction_budget: usize = 5_000_000;
+    const instruction_budget: usize = 60_000_000;
     var instructions: usize = 0;
     var div_reads: [16]u16 = undefined;
     var div_read_count: usize = 0;

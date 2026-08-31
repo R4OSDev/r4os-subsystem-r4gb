@@ -9,7 +9,7 @@
 - Color Game Boy: dual-mode cartridges may execute through their DMG path;
   CGB-only cartridges are rejected. CGB hardware features are out of scope.
 - Boot: no proprietary Nintendo boot ROM is distributed or required.
-- Persistence root: `C:\R4OS\SUBSYSTEMS\r4os.gb\Save\`.
+- Persistence root: `C:\R4OS\APPDATA\SUBSYSTEMS\r4os.gb\SAVE\`.
 - Save states are intentionally out of scope. Battery SRAM and MBC3 RTC
   persistence are product requirements.
 - Link emulation is not part of 0.72.X. The serial hardware remains a distinct
@@ -24,14 +24,34 @@
 | ROM-only and ROM+RAM | Implemented |
 | MBC1, large-ROM wiring, MBC1M | Implemented |
 | MBC2 internal 512x4-bit RAM | Implemented |
-| MBC3/MBC30 banking and RTC register/latch window | Implemented; clock progression and persistence attach in 0.72.7 |
+| MBC3/MBC30 banking, clock, register/latch window and persistence | Implemented |
 | MBC5, including separate ninth ROM and rumble bits | Implemented; no rumble output |
-| MMM01, MBC6, TAMA5, HuC1, HuC3 | Known digital mapper, currently rejected as unsupported |
-| MBC7 sensor/rumble and Pocket Camera | Known unavailable accessory hardware, explicitly rejected |
+| MMM01 | Implemented, including final-header discovery and one-way mapper lock |
+| HuC1 | Implemented for digital ROM/RAM banking and deterministic digital IR reads; no physical IR output |
+| MBC6, HuC3, TAMA5 | Recognized and rejected with a mapper-specific unsupported error |
+| MBC7 sensor/rumble and Pocket Camera | Recognized and rejected with an accessory-specific unavailable error |
 
 All accepted images must match their declared complete ROM length, mapper
 limits, RAM declaration, Nintendo logo, header checksum, and global checksum.
 ROM data is copied into instance-owned immutable storage before use.
+
+## Persistence and real-time clock
+
+- The SHA-256 digest of the complete ROM is its save identity, so renaming or
+  moving a cartridge preserves its data while different content cannot alias.
+- Battery SRAM is the exact declared byte sequence in `HASH.SAV`; non-battery
+  cartridges never create persistence files.
+- MBC3 state is a fixed-size, versioned and checksummed `HASH.RTC` record with
+  subsecond T-cycles, seconds/minutes/hours, 9-bit day, carry, halt, latch and
+  time anchors.
+- One `HASH.LCK` writer lease prevents last-writer-wins corruption across
+  instances. Crash cleanup and release are generation-bound.
+- Dirty data is delayed and atomically replaced in the same directory. Clean
+  Close performs a mandatory final flush; a failed replacement leaves the
+  previously published save intact.
+- Missing files initialize clean state. Wrong SRAM sizes and malformed RTC
+  records are explicit errors. Backward wall-clock movement adds no time and
+  implausible forward movement is capped at 512 days.
 
 ## CPU
 
@@ -75,3 +95,9 @@ audio degradation. The automated QEMU capture additionally requires 6,000
 source frames to reach AUDSVC without loss and detects one continuous,
 non-silent stereo waveform after QEMU's host-rate conversion. CGB- and
 SGB-specific SameSuite audio cases are intentionally outside the DMG target.
+
+RTC3Test v004 passes all three automated UI-driven groups, and the generated
+Mealybug MBC3-RTC reference ROM reaches its pass state. The complete reference
+harness currently covers 15 suites, 850 files and 500127 execution vectors or
+result records. Persistence additionally has injected host-backend tests and
+a marker-gated QEMU test through the real R4SYS filesystem path.

@@ -12,14 +12,14 @@ host establishes a documented post-boot state and starts a cartridge at
 cartridge header validation decides whether a file can run in DMG mode.
 CGB-only cartridges are rejected.
 
-Version 0.6 provides the complete bounded cartridge front end, DMG address
+Version 0.7 provides the complete bounded cartridge front end, DMG address
 bus, SM83 instruction core, shared hardware clock, dot-clocked PPU, and all
 four DMG audio channels. It validates both header and global checksums,
 creates an owned immutable ROM image, models cartridge RAM/RTC register
-windows, and implements ROM-only, MBC1/MBC1M, MBC2, MBC3/MBC30, and MBC5
-banking. Every legal base and CB opcode runs through explicit read, write, and
-idle M-cycle callbacks. Host waits and slice sizes cannot alter device order
-or guest results.
+windows, and implements ROM-only, MBC1/MBC1M, MBC2, MBC3/MBC30, MBC5,
+MMM01, and digital HuC1 banking. Every legal base and CB opcode runs through
+explicit read, write, and idle M-cycle callbacks. Host waits and slice sizes
+cannot alter device order or guest results.
 
 DIV/TIMA falling edges, delayed reload writes, IF/IE dispatch retargeting,
 HALT/STOP wake behavior, the two-M-cycle DMA start delay, all 160 DMA bytes,
@@ -35,6 +35,15 @@ bounded caller-owned buffers. Only `r4os.subsystem_runtime` forwards those
 buffers through App-Audio/AUDSVC; an unavailable audio path degrades audio
 without stopping CPU, timer, or PPU progress.
 
+Battery cartridges persist exact raw SRAM as `HASH.SAV` and versioned MBC3
+clock state as `HASH.RTC` below
+`C:\R4OS\APPDATA\SUBSYSTEMS\r4os.gb\SAVE\`, where `HASH` is the uppercase
+SHA-256 digest of the complete ROM. A create-only per-ROM lease permits one
+writer, delayed dirty flushes use same-directory atomic replacement, and a
+clean close always attempts the final flush. Non-battery cartridges never
+touch persistence. Wall-clock recovery is bounded and cannot run the RTC
+backwards; save states are deliberately absent.
+
 Build on Linux with `./Build.sh test` and on Windows with `Build.bat test`.
 `reference-test` additionally validates a local, optional reference tree; use
 `-Dgb-reference-root=<path>` to override its derived workspace location.
@@ -42,6 +51,10 @@ Build on Linux with `./Build.sh test` and on Windows with `Build.bat test`.
 `cartridge-test -Dgb-cartridge=<path>` validates one explicitly supplied local
 image and proves that probing leaves its bytes unchanged.
 The pinned DMG SameSuite APU selection and the QEMU WAV analyzer cover the
-DIV-APU/NR52 edge cases and the real R4OS audio path independently.
+DIV-APU/NR52 edge cases and the real R4OS audio path independently. Automated
+RTC3Test v004 and Mealybug MBC3-RTC execution cover tick, latch, halt, write,
+overflow, and subsecond behavior; host and guest persistence tests cover raw
+SRAM, corrupt input, exclusive ownership, delayed and atomic writes, and
+restart recovery.
 Commercial ROMs, proprietary boot ROMs, and the local `ExFiles` reference
 tree are never part of this public repository.

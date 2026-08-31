@@ -21,7 +21,8 @@ The component boundaries are:
 | `apu` | four DMG channels, frame sequencer and deterministic mixer | R4OS audio service buffering |
 | `joypad` | P1 selection and eight active-low buttons | keyboard identities |
 | `serial` | SB/SC and transfer timing seam | link transport |
-| `persistence` | battery SRAM/RTC serialization state | save-state snapshots |
+| `persistence` | ROM identity, battery SRAM/RTC format and flush policy | host filesystem implementation or save-state snapshots |
+| `persistence_r4os` | R4SYS-backed leases, exact reads and same-directory atomic replacement | cartridge or emulated-time behavior |
 | `host_adapter` | R4SUBSYS1 and R4OS window/input translation | guest hardware behavior or scheduling |
 | `runtime_adapter` | one bounded guest slice, frame readiness and caller-owned PCM handoff | APU timing or AUDSVC implementation |
 
@@ -55,12 +56,16 @@ does not imply CGB-only hardware, and a
 CGB images fail before a machine is created. The input ROM buffer is never
 modified.
 
-The cartridge owns its complete ROM allocation as a read-only slice. Mapper
-register writes can only select bounded ROM, SRAM, nibble RAM, or RTC register
-indices. Physically absent banks read as `0xFF`; missing power-of-two address
-lines mirror existing storage. MBC1M is selected only after a valid embedded
-bank-`0x10` header is found. MBC5 rumble state is recorded separately and can
-never become a RAM-bank bit.
+The cartridge owns its complete ROM allocation as a read-only slice and its
+SHA-256 identity. Mapper register writes can only select bounded ROM, SRAM,
+nibble RAM, or RTC register indices. Physically absent banks read as `0xFF`;
+missing power-of-two address lines mirror existing storage. MBC1M is selected
+only after a valid embedded bank-`0x10` header is found. MMM01 uses the valid
+header in the final 32 KiB and preserves its one-way mapper lock. HuC1 exposes
+only its deterministic digital mapper behavior. MBC5 rumble state is recorded
+separately and can never become a RAM-bank bit. Hardware-dependent MBC7,
+Pocket Camera, MBC6, HuC3, and TAMA5 images fail with specific capability
+errors before a machine is created.
 
 The bus classifies every `u16` address into exactly one DMG region. WRAM echo,
 DMG unusable-area values, VRAM/OAM mode gates, and DMA CPU exclusion are
@@ -110,6 +115,13 @@ releases all held buttons. SB/SC use the shared post-boot divider phase; an
 internal transfer shifts eight pulled-up input bits and requests Serial, while
 external-clock mode remains pending without host blocking or network access.
 
+The MBC3 clock advances on the guest T-cycle axis independently of CPU HALT
+and STOP. It preserves a subsecond divider, masks writable register bits,
+samples on the documented latch zero-to-one transition, freezes while halted,
+and sets a sticky carry when day 511 overflows. Offline wall-clock recovery is
+applied only while loading a valid persisted record, ignores backward jumps,
+and bounds implausibly large forward jumps.
+
 ## Audio boundary
 
 NR52 owns APU power and channel-status reads. DIV bit 12 falling edges clock
@@ -128,6 +140,26 @@ bytes before finite completion. If the backend becomes unavailable, capture
 is disabled and reported as degraded while CPU, timer, PPU, and guest time
 continue through the same bounded slice path.
 
+## Persistence boundary
+
+Persistence is keyed by the uppercase SHA-256 digest of the complete immutable
+ROM, never by a filename. Battery RAM is stored byte-for-byte in `HASH.SAV`;
+the fixed-size, checksummed `HASH.RTC` record contains a format version, RTC
+registers, subsecond T-cycles, wall and monotonic anchors, and the owning
+generation. Missing files mean a fresh cartridge. A wrong SRAM length or an
+invalid RTC record is reported as corruption rather than silently rewritten.
+Non-battery cartridges never acquire a lease or access the save directory.
+
+One retained create-only `HASH.LCK` stream grants exclusive write ownership to
+one cartridge instance. Flushes write a finished same-directory stage and use
+R4SYS atomic replacement with no non-atomic fallback. A second short
+create-only transaction lease protects the compressed 8.3 stage/backup token
+against collisions before either path is touched. Delayed dirty writes are
+retried after errors; clean Close performs a mandatory final attempt and then
+releases the exact generation idempotently. Kernel process reaping removes
+leases left by a crashed process without allowing a stale generation to
+release a newer owner.
+
 ## Test boundary
 
 Small original fixtures live in this repository. Large JSON vectors and open
@@ -138,5 +170,10 @@ The DMG-C machine selection executes 33 revision-applicable Mooneye cases and
 records PPU-dependent and foreign-revision cases separately. Commercial ROMs
 are local manual compatibility inputs only. The APU selection adds both
 DMG-applicable SameSuite DIV/NR52 ROMs; CGB and SGB audio cases remain excluded.
+RTC3Test v004 runs all three of its UI-driven conformance groups and the
+Mealybug MBC3-RTC ROM reaches its bounded pass state. Pure backend tests inject
+missing, corrupt, full-disk, interrupted-write, lease-contention and clock-jump
+conditions; the QEMU product-path test verifies exact SRAM/RTC restart,
+exclusive ownership and atomic replacement through the real guest filesystem.
 An independent QEMU WAV gate identifies R4GB's 48-kHz source by its deliberate
 2:1 stereo mix after host resampling and rejects a missing audio quantum.

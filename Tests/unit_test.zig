@@ -294,13 +294,19 @@ test "unknown, digital-gap and accessory-dependent cartridges stay distinct" {
     try std.testing.expectError(error.UnknownCartridgeType, core.cartridge.parse(bytes));
     bytes[0x147] = 0x20;
     finalize(bytes);
-    try std.testing.expectError(error.UnsupportedMapper, core.cartridge.parse(bytes));
+    try std.testing.expectError(error.UnsupportedMbc6, core.cartridge.parse(bytes));
     bytes[0x147] = 0x22;
     finalize(bytes);
-    try std.testing.expectError(error.UnavailableAccessory, core.cartridge.parse(bytes));
+    try std.testing.expectError(error.UnsupportedMbc7Accessory, core.cartridge.parse(bytes));
     bytes[0x147] = 0xFC;
     finalize(bytes);
-    try std.testing.expectError(error.UnavailableAccessory, core.cartridge.parse(bytes));
+    try std.testing.expectError(error.UnsupportedCameraAccessory, core.cartridge.parse(bytes));
+    bytes[0x147] = 0xFD;
+    finalize(bytes);
+    try std.testing.expectError(error.UnsupportedTama5, core.cartridge.parse(bytes));
+    bytes[0x147] = 0xFE;
+    finalize(bytes);
+    try std.testing.expectError(error.UnsupportedHuc3, core.cartridge.parse(bytes));
 
     bytes[0x147] = 0x00;
     bytes[0x149] = 0x02;

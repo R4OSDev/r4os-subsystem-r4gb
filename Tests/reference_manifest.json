@@ -108,9 +108,18 @@
     {
       "id": "rtc3test-v004",
       "path": "Tests/Binaries/rtc3test-v004.gb",
-      "kind": "rom_file",
+      "kind": "rtc3_machine",
       "expected_files": 1,
+      "expected_records": 3,
       "categories": ["mapper", "mbc3-rtc"]
+    },
+    {
+      "id": "mealybug-mbc3-rtc-70e88fb",
+      "path": "Tests/Binaries/Generated/Mealybug-70e88fb/mbc3_rtc.gb",
+      "kind": "machine_rom_file",
+      "expected_files": 1,
+      "expected_records": 1,
+      "categories": ["machine", "mapper", "mbc3-rtc"]
     }
   ]
 }

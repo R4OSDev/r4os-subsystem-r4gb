@@ -7,7 +7,6 @@ const dma = @import("dma.zig");
 const interrupts = @import("interrupts.zig");
 const joypad = @import("joypad.zig");
 const model = @import("model.zig");
-const persistence = @import("persistence.zig");
 const ppu = @import("ppu.zig");
 const serial = @import("serial.zig");
 const timer = @import("timer.zig");
@@ -25,7 +24,6 @@ pub const Machine = struct {
     apu: apu.Apu = .{},
     joypad: joypad.Joypad,
     serial: serial.Serial,
-    persistence: persistence.Persistence = .{},
     guest_clock: clock.Clock = .{},
     guest_t_cycles: u64 = 0,
 
@@ -182,6 +180,10 @@ pub const Machine = struct {
     }
 
     pub fn tickTcycles(self: *Machine, count: u32) void {
+        // The cartridge oscillator is independent of CPU HALT/STOP. Advancing
+        // it once per granted guest interval also keeps long offline/test
+        // jumps bounded and deterministic.
+        self.cartridge.advanceRtcTcycles(count);
         var remaining = count;
         while (remaining != 0) : (remaining -= 1) self.tickOne();
     }
