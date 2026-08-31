@@ -177,7 +177,9 @@ against collisions before either path is touched. Delayed dirty writes are
 retried after errors; clean Close performs a mandatory final attempt and then
 releases the exact generation idempotently. Kernel process reaping removes
 leases left by a crashed process without allowing a stale generation to
-release a newer owner.
+release a newer owner. If a fresh NTFS mutation loses its acknowledgement,
+R4GB retries only the R4SYS ownership-checked abort for its exact lease before
+retrying Begin; it never removes a competing instance's lock by pathname.
 
 ## Test boundary
 
@@ -203,3 +205,13 @@ progress after peer Close, and teardown balance. A real headless R4OS window
 gate exercises physical input, presentation, App-Audio, Pause/Resume, Reset,
 Mute/Unmute, Close, and the same resource owner path without requiring visual
 inspection.
+
+The Explorer product gate generates three deterministic original cartridges:
+a ROM-only DMG image, a dual-mode MBC3 battery/RTC image, and a CGB-only
+negative image. It resolves all three from installed catalog metadata and the
+stable ID-only associations, performs the bounded probe independently of
+Explorer's metadata-first choice, opens two instances concurrently through
+`R4SUBSYS1`, and requires separate video, physical input, time, audio,
+persistence, Close, and teardown reports. The negative image must first expose
+the concrete CGB diagnostic in a valid GUI frame and then close cooperatively.
+No commercial cartridge is read by this automated path.

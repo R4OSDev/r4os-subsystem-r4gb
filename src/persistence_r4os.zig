@@ -3,12 +3,29 @@ const r4os = @import("r4os");
 const persistence = @import("persistence.zig");
 
 const PathRole = enum { sram, rtc, lock, atomic_lock, sram_stage, rtc_stage, sram_backup, rtc_backup };
+const create_retry_attempts: usize = 8;
+const create_retry_delay_ms: u64 = 25;
+
+pub const FailureStage = enum {
+    none,
+    save_root,
+    lock_begin,
+    lock_write,
+    lock_finish,
+    lock_abort,
+    sram_info,
+    sram_read,
+    rtc_info,
+    rtc_read,
+};
 
 pub const Store = struct {
     files: r4os.app_storage.Files,
     lock_writer: ?r4os.app_storage.OwnedStageWriter = null,
     lock_generation: u64 = 0,
     lock_digest: [persistence.digest_bytes]u8 = .{0} ** persistence.digest_bytes,
+    failure_stage: FailureStage = .none,
+    failure_code: i32 = 0,
 
     pub fn init(files: r4os.app_storage.Files) Store {
         return .{ .files = files };
@@ -22,6 +39,14 @@ pub const Store = struct {
             .read_exact_fn = readExact,
             .write_atomic_fn = writeAtomic,
         };
+    }
+
+    pub fn failureStageName(self: *const Store) []const u8 {
+        return @tagName(self.failure_stage);
+    }
+
+    pub fn failureCode(self: *const Store) i32 {
+        return self.failure_code;
     }
 
     pub fn removeTestFiles(self: *Store, digest: *const [persistence.digest_bytes]u8) void {
@@ -48,44 +73,37 @@ pub const Store = struct {
     fn acquire(context: *anyopaque, digest: *const [persistence.digest_bytes]u8, generation: u64) persistence.BackendError!void {
         const self: *Store = @ptrCast(@alignCast(context));
         if (self.lock_writer != null) return error.Busy;
-        try ensureSaveRoot(&self.files);
+        self.failure_stage = .none;
+        self.failure_code = 0;
+        ensureSaveRoot(&self.files) catch |fault| {
+            self.recordFailure(.save_root, 0);
+            return fault;
+        };
         const path = makePath(digest, .lock) catch return error.Io;
-        var writer = switch (self.files.ownedCreateWriter(path.asZ())) {
-            .writer => |value| value,
-            .failure => |fault| return mapOpenFault(fault),
-        };
-        var keep = false;
-        defer if (!keep) {
-            _ = writer.abort();
-        };
-        var body: [96]u8 = undefined;
-        const lock_body = std.fmt.bufPrint(body[0..], "R4GB_SAVE_LOCK=1\nGENERATION={d}\n", .{generation}) catch return error.Io;
-        switch (writer.write(lock_body)) {
-            .ok => {},
-            else => return error.Io,
+        for (0..create_retry_attempts) |attempt| {
+            const writer = createOwnedLock(self, &path, generation) catch |fault| {
+                if (fault != error.Io or self.failure_stage == .lock_abort or attempt + 1 == create_retry_attempts) return fault;
+                waitForCreateRetry(&self.files);
+                continue;
+            };
+            self.lock_writer = writer;
+            self.lock_generation = generation;
+            self.lock_digest = digest.*;
+            self.failure_stage = .none;
+            self.failure_code = 0;
+            return;
         }
-        switch (writer.finishKeepOwnership()) {
-            .ok => {},
-            else => return error.Io,
-        }
-        keep = true;
-        self.lock_writer = writer;
-        self.lock_generation = generation;
-        self.lock_digest = digest.*;
+        unreachable;
     }
 
     fn release(context: *anyopaque, digest: *const [persistence.digest_bytes]u8, generation: u64) persistence.BackendError!void {
         const self: *Store = @ptrCast(@alignCast(context));
         if (self.lock_writer == null) return;
         if (self.lock_generation != generation or !std.mem.eql(u8, self.lock_digest[0..], digest[0..])) return error.Io;
-        var writer = self.lock_writer.?;
+        const path = makePath(digest, .lock) catch return error.Io;
+        if (!abortOwnedPathWithRetry(self, &path)) return error.Io;
         self.lock_writer = null;
         self.lock_generation = 0;
-        switch (writer.abort()) {
-            .ok => {},
-            .failure => |fault| if (fault != r4os.abi.file_stream_error_not_found) return error.Io,
-            .missing => {},
-        }
     }
 
     fn readExact(
@@ -96,17 +114,32 @@ pub const Store = struct {
     ) persistence.ReadResult {
         const self: *Store = @ptrCast(@alignCast(context));
         const path = makePath(digest, if (kind == .sram) .sram else .rtc) catch return .io;
-        const info = switch (self.files.info(path.asZ())) {
-            .value => |value| value,
-            .missing => return .missing,
-            .failure => return .io,
+        const info = info_retry: {
+            for (0..create_retry_attempts) |attempt| {
+                switch (self.files.info(path.asZ())) {
+                    .value => |value| break :info_retry value,
+                    .missing => return .missing,
+                    .failure => |fault| {
+                        if (attempt + 1 == create_retry_attempts) {
+                            self.recordFailure(if (kind == .sram) .sram_info else .rtc_info, fault);
+                            return .io;
+                        }
+                        waitForCreateRetry(&self.files);
+                    },
+                }
+            }
+            unreachable;
         };
         if (info.is_dir != 0 or info.size != out.len) return .wrong_size;
         var offset: usize = 0;
         while (offset < out.len) {
             const transferred = switch (self.files.readAt(path.asZ(), @intCast(offset), out[offset..])) {
                 .bytes => |count| count,
-                .end, .failure => return .io,
+                .end => return .io,
+                .failure => |fault| {
+                    self.recordFailure(if (kind == .sram) .sram_read else .rtc_read, fault);
+                    return .io;
+                },
             };
             if (transferred == 0 or transferred > out.len - offset) return .io;
             offset += transferred;
@@ -165,7 +198,18 @@ pub const Store = struct {
             else => return error.Io,
         }
     }
+
+    fn recordFailure(self: *Store, stage: FailureStage, code: i32) void {
+        self.failure_stage = stage;
+        self.failure_code = code;
+    }
 };
+
+/// Exposes only the two durable data names for product diagnostics. Atomic
+/// staging, backups and writer leases remain private implementation details.
+pub fn dataPath(digest: *const [persistence.digest_bytes]u8, kind: persistence.FileKind) !r4os.AbsoluteFilePath {
+    return makePath(digest, if (kind == .sram) .sram else .rtc);
+}
 
 fn ensureSaveRoot(files: *const r4os.app_storage.Files) persistence.BackendError!void {
     const directories = [_][]const u8{
@@ -176,11 +220,88 @@ fn ensureSaveRoot(files: *const r4os.app_storage.Files) persistence.BackendError
     };
     for (directories) |raw| {
         const path = r4os.AbsoluteFilePath.parse(raw) catch return error.Io;
-        switch (files.createDirectory(path.asZ())) {
-            .ok, .missing => {},
-            .failure => return error.Io,
+        var visible = false;
+        for (0..create_retry_attempts) |attempt| {
+            _ = files.createDirectory(path.asZ());
+            visible = switch (files.info(path.asZ())) {
+                .value => |info| info.is_dir != 0,
+                .missing, .failure => false,
+            };
+            if (visible) break;
+            if (attempt + 1 != create_retry_attempts) waitForCreateRetry(files);
         }
+        if (!visible) return error.Io;
     }
+}
+
+fn createOwnedLock(
+    self: *Store,
+    path: *const r4os.AbsoluteFilePath,
+    generation: u64,
+) persistence.BackendError!r4os.app_storage.OwnedStageWriter {
+    var writer = switch (self.files.ownedCreateWriter(path.asZ())) {
+        .writer => |value| value,
+        .failure => |fault| {
+            self.recordFailure(.lock_begin, fault);
+            if (fault == r4os.abi.file_stream_error_io and !abortOwnedPathWithRetry(self, path)) return error.Io;
+            return mapOpenFault(fault);
+        },
+    };
+
+    var body: [96]u8 = undefined;
+    const lock_body = std.fmt.bufPrint(body[0..], "R4GB_SAVE_LOCK=1\nGENERATION={d}\n", .{generation}) catch {
+        if (!abortOwnedPathWithRetry(self, path)) return error.Io;
+        return error.Io;
+    };
+    switch (writer.write(lock_body)) {
+        .ok => {},
+        .failure => |fault| {
+            self.recordFailure(.lock_write, fault);
+            if (!abortOwnedPathWithRetry(self, path)) return error.Io;
+            return mapOpenFault(fault);
+        },
+        .missing => {
+            self.recordFailure(.lock_write, 0);
+            if (!abortOwnedPathWithRetry(self, path)) return error.Io;
+            return error.Io;
+        },
+    }
+    switch (writer.finishKeepOwnership()) {
+        .ok => {},
+        .failure => |fault| {
+            self.recordFailure(.lock_finish, fault);
+            if (!abortOwnedPathWithRetry(self, path)) return error.Io;
+            return mapOpenFault(fault);
+        },
+        .missing => {
+            self.recordFailure(.lock_finish, 0);
+            if (!abortOwnedPathWithRetry(self, path)) return error.Io;
+            return error.Io;
+        },
+    }
+    return writer;
+}
+
+/// A failed stream operation may have crossed its namespace visibility point
+/// while losing the acknowledgement. Abort is ownership-checked by R4SYS, so
+/// bounded retries can retire only this process' exact lease before Begin is
+/// attempted again; a competing cartridge instance is never deleted by path.
+fn abortOwnedPathWithRetry(self: *Store, path: *const r4os.AbsoluteFilePath) bool {
+    for (0..create_retry_attempts) |attempt| {
+        const raw = self.files.sys.fileStreamAbort(path.asZ().ptr);
+        if (raw == r4os.abi.file_stream_result_ok or raw == r4os.abi.file_stream_error_not_found) return true;
+        if (raw != r4os.abi.file_stream_error_io or attempt + 1 == create_retry_attempts) {
+            self.recordFailure(.lock_abort, raw);
+            return false;
+        }
+        waitForCreateRetry(&self.files);
+    }
+    unreachable;
+}
+
+fn waitForCreateRetry(files: *const r4os.app_storage.Files) void {
+    const delay = @max(@as(u64, 1), files.sys.ticksFromMilliseconds(create_retry_delay_ms));
+    files.sys.sleepTicks(delay);
 }
 
 fn makePath(digest: *const [persistence.digest_bytes]u8, role: PathRole) !r4os.AbsoluteFilePath {

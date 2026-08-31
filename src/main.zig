@@ -39,6 +39,7 @@ const error_runtime: i32 = 79;
 const error_apu_selftest: i32 = 94;
 const error_persistence_selftest: i32 = 95;
 const error_host_selftest: i32 = 96;
+const error_e2e_trace: i32 = 97;
 // A short finite hardware path keeps the nested QEMU software-emulation gate
 // bounded. The host model test separately proves an exact full second/48 kHz.
 const apu_selftest_duration_ns: u64 = 125 * std.time.ns_per_ms;
@@ -55,6 +56,9 @@ const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
 const product_audio_target_quanta: u16 = 2;
 const host_selftest_marker_path = "C:\\TEMP\\R4GB.HOST";
 const host_selftest_marker = "R4GB host runtime: OK instances=model-2+window-1 slices=bounded input=physical+focus video=160x144+generation audio=app-audio lifecycle=pause+resume+reset+mute+close resources=closed\r\n";
+const e2e_fixture_a_path = "C:\\TEMP\\R4GB-E2E-A.GB";
+const e2e_fixture_b_path = "C:\\TEMP\\R4GB-E2E-B.GBC";
+const e2e_fixture_cgb_path = "C:\\TEMP\\R4GB-CGB-ONLY.GBC";
 
 const SelfTestHost = struct {
     system: *const r4os.r4sys.Context,
@@ -153,6 +157,7 @@ fn runProduct(app: *r4os.App) i32 {
             "Eine GB-Datei muss ueber Explorer oder Open With gestartet werden.",
         }, error_launch);
     };
+    const e2e_trace = E2eTrace.parse(launch);
     var path = r4os.AbsoluteFilePath.parse(launch.guest_path) catch {
         sys.println("R4GB: invalid absolute cartridge path.");
         return showStatus(allocator, sys, desk, draw, "R4GB - Startfehler", &.{
@@ -184,11 +189,18 @@ fn runProduct(app: *r4os.App) i32 {
         sys.write("R4GB: cartridge rejected: ");
         sys.println(@errorName(fault));
         const code = openFailureCode(fault);
-        return showStatus(allocator, sys, desk, draw, "R4GB - Cartridgefehler", &.{
+        const status_result = showStatus(allocator, sys, desk, draw, "R4GB - Cartridgefehler", &.{
             openFailureMessage(fault),
             launch.guest_path,
             @errorName(fault),
         }, code);
+        if (e2e_trace.active) {
+            if (fault != error.CgbOnly or guest.resourcesOpen() or !writeE2eRejection(&sys, e2e_trace, fault)) {
+                _ = writeE2eFailure(&sys, e2e_trace, "open", fault, save_store.failureStageName(), save_store.failureCode());
+                return error_e2e_trace;
+            }
+        }
+        return status_result;
     };
 
     const surface = guest.initialSurface() catch {
@@ -260,8 +272,39 @@ fn runProduct(app: *r4os.App) i32 {
     const exit_code = runtime.run(&sys, guest.driver(), runtime_host.driver());
     const runtime_state = runtime.state;
     const audio_degraded = runtime.audio.state == .degraded;
+    const runtime_stats = runtime.stats;
+    const audio_stats = runtime.audio.stats;
+    const published_frames = window.video.stats.published_frames;
+    const save_enabled = guest.save_session.?.enabled;
+    const save_has_rtc = guest.machine.?.cartridge.header.type_info.has_timer;
+    const save_ram_bytes = guest.machine.?.cartridge.external_ram.len;
+    const save_digest = guest.machine.?.cartridge.rom_digest;
+    const guest_cycles = guest.machine.?.guest_t_cycles;
     runtime.shutdown();
     const close_result = guest.close();
+    if (e2e_trace.active) {
+        const save_files = !save_enabled or persistenceFilesPresent(&files, &save_digest, save_ram_bytes, save_has_rtc);
+        const e2e_ok = exit_code == 0 and runtime_state == .closed and close_result == 0 and !guest.resourcesOpen() and
+            runtime_stats.slices != 0 and guest.stats.maximum_slice_operations <= product_host.slice_budget_t_cycles + 24 and
+            guest.input.input_events >= 2 and !guest.input.focused and published_frames != 0 and
+            audio_stats.writes != 0 and !audio_degraded and save_files;
+        if (!writeE2eRuntimeReport(
+            &sys,
+            e2e_trace,
+            launch.guest_path,
+            e2e_ok,
+            save_enabled,
+            save_has_rtc,
+            save_files,
+            guest_cycles,
+            runtime_stats,
+            audio_stats,
+            guest.stats,
+            published_frames,
+            close_result,
+        )) return error_e2e_trace;
+        if (!e2e_ok) return error_e2e_trace;
+    }
     if (close_result != 0) {
         sys.println("R4GB: clean persistence close failed.");
         return error_save_close;
@@ -275,6 +318,129 @@ fn runProduct(app: *r4os.App) i32 {
         rendered,
         if (audio_degraded) "Audio war degradiert; Video und Eingabe liefen unabhaengig weiter." else "Alle Instanzressourcen wurden freigegeben.",
     }, if (exit_code == 0) error_runtime else exit_code);
+}
+
+const E2eTrace = struct {
+    active: bool = false,
+    id: []const u8 = "",
+
+    fn parse(request: r4os.subsystem_launch.Request) E2eTrace {
+        const mode = (request.option(r4os.subsystem_launch.trace_mode_key) catch null) orelse return .{};
+        if (!std.ascii.eqlIgnoreCase(mode, r4os.subsystem_launch.trace_mode_headless)) return .{};
+        const id = (request.option(r4os.subsystem_launch.trace_key) catch null) orelse return .{};
+        if (id.len != 16) return .{};
+        for (id) |byte| if (!std.ascii.isHex(byte)) return .{};
+        return .{ .active = true, .id = id };
+    }
+};
+
+fn e2eReportPath(trace: E2eTrace, storage: *[96]u8) ?[*:0]const u8 {
+    const path = std.fmt.bufPrintZ(storage[0..], "C:\\TEMP\\R4GB-{s}.REPORT", .{trace.id}) catch return null;
+    return path.ptr;
+}
+
+fn writeE2eRejection(sys: *const r4os.r4sys.Context, trace: E2eTrace, fault: anyerror) bool {
+    var path_storage: [96]u8 = undefined;
+    const path = e2eReportPath(trace, &path_storage) orelse return false;
+    var report_storage: [192]u8 = undefined;
+    const report = std.fmt.bufPrint(report_storage[0..], "R4GB E2E rejection: OK id={s} error={s} window=closed resources=closed\r\n", .{
+        trace.id,
+        @errorName(fault),
+    }) catch return false;
+    return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
+}
+
+fn writeE2eFailure(
+    sys: *const r4os.r4sys.Context,
+    trace: E2eTrace,
+    phase: []const u8,
+    fault: anyerror,
+    storage_stage: []const u8,
+    storage_code: i32,
+) bool {
+    var path_storage: [96]u8 = undefined;
+    const path = e2eReportPath(trace, &path_storage) orelse return false;
+    var report_storage: [192]u8 = undefined;
+    const report = std.fmt.bufPrint(report_storage[0..], "R4GB E2E diagnostic: FAILED id={s} phase={s} error={s} storage_stage={s} storage_code={d}\r\n", .{
+        trace.id,
+        phase,
+        @errorName(fault),
+        storage_stage,
+        storage_code,
+    }) catch return false;
+    return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
+}
+
+fn writeE2eRuntimeReport(
+    sys: *const r4os.r4sys.Context,
+    trace: E2eTrace,
+    guest_path: []const u8,
+    ok: bool,
+    battery: bool,
+    rtc: bool,
+    save_files: bool,
+    guest_cycles: u64,
+    runtime_stats: runtime_api.RuntimeStats,
+    audio_stats: runtime_api.AudioStats,
+    guest_stats: product_host.GuestStats,
+    published_frames: u64,
+    close_result: i32,
+) bool {
+    var path_storage: [96]u8 = undefined;
+    const path = e2eReportPath(trace, &path_storage) orelse return false;
+    var report_storage: [640]u8 = undefined;
+    const extension = if (endsWithIgnoreCase(guest_path, ".gbc")) ".gbc" else ".gb";
+    const report = std.fmt.bufPrint(report_storage[0..],
+        "R4GB E2E runtime: {s} id={s} extension={s} battery={d} rtc={d} guest_cycles={d} slices={d} max_slice={d} input={d} frames={d} audio_writes={d} pauses={d} resumes={d} resets={d} save_files={d} close={d} resources=closed\r\n",
+        .{
+            if (ok) "OK" else "FAILED",
+            trace.id,
+            extension,
+            @intFromBool(battery),
+            @intFromBool(rtc),
+            guest_cycles,
+            runtime_stats.slices,
+            guest_stats.maximum_slice_operations,
+            runtime_stats.input_events,
+            published_frames,
+            audio_stats.writes,
+            runtime_stats.pauses,
+            runtime_stats.resumes,
+            runtime_stats.resets,
+            @intFromBool(save_files),
+            close_result,
+        },
+    ) catch return false;
+    return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
+}
+
+fn persistenceFilesPresent(
+    files: *const r4os.Files,
+    digest: *const [core.persistence.digest_bytes]u8,
+    ram_bytes: usize,
+    has_rtc: bool,
+) bool {
+    if (ram_bytes != 0) {
+        const path = persistence_r4os.dataPath(digest, .sram) catch return false;
+        const info = switch (files.info(path.asZ())) {
+            .value => |value| value,
+            .missing, .failure => return false,
+        };
+        if (info.is_dir != 0 or info.size != ram_bytes) return false;
+    }
+    if (has_rtc) {
+        const path = persistence_r4os.dataPath(digest, .rtc) catch return false;
+        const info = switch (files.info(path.asZ())) {
+            .value => |value| value,
+            .missing, .failure => return false,
+        };
+        if (info.is_dir != 0 or info.size != core.persistence.rtc_record_bytes) return false;
+    }
+    return true;
+}
+
+fn endsWithIgnoreCase(value: []const u8, suffix: []const u8) bool {
+    return value.len >= suffix.len and std.ascii.eqlIgnoreCase(value[value.len - suffix.len ..], suffix);
 }
 
 const ProductTimeContext = struct {
@@ -402,6 +568,7 @@ fn showStatus(
     _ = desk.guiSetMinSize(400, 220);
     if (!renderStatus(&draw, lines)) return result_code;
     var activity_sequence: u64 = 0;
+    const close_poll_ticks = @max(@as(u64, 1), sys.ticksFromMilliseconds(100));
     while (!sys.programShouldClose()) {
         var event_count: u16 = 0;
         while (event_count < runtime_api.default_max_input_events) : (event_count += 1) {
@@ -416,7 +583,7 @@ fn showStatus(
         if (event_count == runtime_api.default_max_input_events) continue;
         if (desk.hasFn("desktop_activity_wait")) {
             var sequence = activity_sequence;
-            const raw = desk.desktopActivityWait(activity_sequence, r4os.abi.io_wait_forever, &sequence);
+            const raw = desk.desktopActivityWait(activity_sequence, close_poll_ticks, &sequence);
             activity_sequence = sequence;
             if (raw < 0) return result_code;
         } else {
@@ -690,12 +857,31 @@ fn hostSelfTest(app: *r4os.App) i32 {
         sys.println(if (audio_degraded) "degraded" else "ok");
         return error_host_selftest;
     }
+    if (!writeE2eFixtureFiles(&sys, allocator)) {
+        sys.println("R4GB host runtime: FAILED fixture-write");
+        return error_host_selftest;
+    }
     if (sys.fileWrite(host_selftest_marker_path, host_selftest_marker) != @as(i32, @intCast(host_selftest_marker.len))) {
         sys.println("R4GB host runtime: FAILED marker-write");
         return error_host_selftest;
     }
     sys.write(host_selftest_marker);
     return 0;
+}
+
+fn writeE2eFixtureFiles(sys: *const r4os.r4sys.Context, allocator: std.mem.Allocator) bool {
+    const image = allocator.alloc(u8, core.fixture_rom.image_bytes) catch return false;
+    defer allocator.free(image);
+    const fixtures = [_]struct { path: [*:0]const u8, kind: core.fixture_rom.Kind }{
+        .{ .path = e2e_fixture_a_path, .kind = .rom_only },
+        .{ .path = e2e_fixture_b_path, .kind = .battery_rtc },
+        .{ .path = e2e_fixture_cgb_path, .kind = .cgb_only },
+    };
+    for (fixtures) |fixture| {
+        core.fixture_rom.build(image, fixture.kind) catch return false;
+        if (sys.fileWrite(fixture.path, image) != @as(i32, @intCast(image.len))) return false;
+    }
+    return true;
 }
 
 fn persistenceSelfTest(app: *r4os.App) i32 {

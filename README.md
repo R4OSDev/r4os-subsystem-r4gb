@@ -12,7 +12,7 @@ host establishes a documented post-boot state and starts a cartridge at
 cartridge header validation decides whether a file can run in DMG mode.
 CGB-only cartridges are rejected.
 
-Version 0.8 provides the complete bounded cartridge front end, DMG address
+Version 0.9 provides the complete bounded cartridge front end, DMG address
 bus, SM83 instruction core, shared hardware clock, dot-clocked PPU, and all
 four DMG audio channels. It validates both header and global checksums,
 creates an owned immutable ROM image, models cartridge RAM/RTC register
@@ -41,8 +41,10 @@ clock state as `HASH.RTC` below
 SHA-256 digest of the complete ROM. A create-only per-ROM lease permits one
 writer, delayed dirty flushes use same-directory atomic replacement, and a
 clean close always attempts the final flush. Non-battery cartridges never
-touch persistence. Wall-clock recovery is bounded and cannot run the RTC
-backwards; save states are deliberately absent.
+touch persistence. Lost filesystem acknowledgements are retried only after an
+ownership-checked lease abort; a real competing writer remains a Busy error.
+Wall-clock recovery is bounded and cannot run the RTC backwards; save states
+are deliberately absent.
 
 Build on Linux with `./Build.sh test` and on Windows with `Build.bat test`.
 `reference-test` additionally validates a local, optional reference tree; use
@@ -67,5 +69,18 @@ Reset, runtime failure, normal window Close, and repeated Close all converge
 on the same idempotent teardown of audio, video, persistence, machine, and ROM
 ownership. Load, CGB, mapper, accessory, save, and runtime failures remain in
 the cartridge's own window with a concrete diagnosis.
+
+The installed `MODULES.JSON` entry is the only source for the subsystem host,
+display name, `.gb`/`.gbc` candidates, format ID, and bounded cartridge probe.
+`ASSOC.R4S` stores only `r4os.gb` plus `gameboy.dmg-cartridge`, so Explorer
+double-click and Open With both resolve the installed host and create a new
+R4X instance. The headless product gate performs that exact path for two
+simultaneous original test cartridges, injects physical keyboard events,
+requires frames and App-Audio, persists SRAM and RTC, closes each instance
+separately, and proves a CGB-only image is rejected in its own visible window.
+The deterministic test cartridges are generated entirely from original source
+in this repository and contain no proprietary boot ROM, game data, or brand
+assets.
+
 Commercial ROMs, proprietary boot ROMs, and the local `ExFiles` reference
 tree are never part of this public repository.

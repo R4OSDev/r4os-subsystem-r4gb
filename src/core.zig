@@ -12,6 +12,7 @@ pub const model = @import("model.zig");
 pub const persistence = @import("persistence.zig");
 pub const ppu = @import("ppu.zig");
 pub const product_host = @import("product_host.zig");
+pub const fixture_rom = @import("fixture_rom.zig");
 pub const runtime_adapter = @import("runtime_adapter.zig");
 pub const serial = @import("serial.zig");
 pub const test_vectors = @import("test_vectors.zig");

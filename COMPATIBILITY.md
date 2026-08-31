@@ -21,6 +21,9 @@
 
 ## Product host
 
+- The installed `MODULES.JSON` record is the single source of host path,
+  display name, `.gb`/`.gbc` candidates, format ID, and bounded probe.
+  `ASSOC.R4S` stores only the stable subsystem and guest-format IDs.
 - Explorer/Open-With launches use the bounded `R4SUBSYS1` record and require
   one absolute guest path. The complete file is read once into immutable,
   instance-owned storage and validated before execution.
@@ -121,4 +124,10 @@ RTC3Test v004 passes all three automated UI-driven groups, and the generated
 Mealybug MBC3-RTC reference ROM reaches its pass state. The complete reference
 harness currently covers 15 suites, 850 files and 500127 execution vectors or
 result records. Persistence additionally has injected host-backend tests and
-a marker-gated QEMU test through the real R4SYS filesystem path.
+a marker-gated QEMU test through the real R4SYS filesystem path. The
+product-level QEMU gate also opens generated `.gb` and dual-mode `.gbc`
+cartridges simultaneously via Explorer's resolver, dispatches physical
+keyboard input to each focused window, requires App-Audio and changed frames,
+persists battery SRAM plus RTC, closes both independently, and verifies a
+generated CGB-only cartridge reaches the visible rejection window without
+creating a machine.
