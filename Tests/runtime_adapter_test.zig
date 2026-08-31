@@ -130,6 +130,37 @@ test "finite runtime drains every generated APU frame before completion" {
     try std.testing.expectEqual(@as(u64, 6000 * core.apu.sample_bytes), sink.bytes);
 }
 
+test "WRAM completion witness stops guest work and drains audio exactly once" {
+    var machine = try makeMachine();
+    defer machine.deinit();
+    configureTone(&machine);
+    var adapter = core.runtime_adapter.Adapter.init(&machine);
+    try std.testing.expectError(
+        error.InvalidCompletionWitnessAddress,
+        adapter.setCompletionWitness(.{ .address = 0xBFFF, .value = 0xA5 }),
+    );
+    try adapter.setCompletionWitness(.{ .address = 0xC001, .value = 0xA5 });
+
+    const driver = adapter.driver();
+    _ = driver.step(core.clock.frame_t_cycles, 0);
+    _ = driver.step(core.clock.frame_t_cycles, 20 * std.time.ns_per_ms);
+    machine.bus.work_ram[1] = 0xA5;
+    _ = driver.step(core.clock.frame_t_cycles, 20 * std.time.ns_per_ms);
+    try std.testing.expect(adapter.source_finished);
+    const finished_cycles = machine.guest_t_cycles;
+
+    var audio: [480 * core.apu.sample_bytes]u8 = undefined;
+    while (machine.apu.queuedFrames() != 0) {
+        const rendered = driver.renderAudio(audio[0..]);
+        try std.testing.expect(rendered > 0);
+        _ = driver.audioFeedback(.{ .state = .active, .muted = false, .accepted_bytes = @intCast(rendered) });
+    }
+    const completed = driver.step(core.clock.frame_t_cycles, 10 * std.time.ns_per_s);
+    try std.testing.expectEqual(runtime_api.StepStatus.completed, completed.status);
+    try std.testing.expectEqual(finished_cycles, machine.guest_t_cycles);
+    try std.testing.expectEqual(@as(u64, 0), adapter.transport_pending_bytes);
+}
+
 fn configureTone(machine: *core.machine.Machine) void {
     machine.write(0xFF26, 0);
     machine.write(0xFF26, 0x80);

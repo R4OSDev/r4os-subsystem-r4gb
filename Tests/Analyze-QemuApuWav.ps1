@@ -3,12 +3,19 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'File')]
     [string]$Path,
 
+    [Parameter(ParameterSetName = 'File')]
+    [ValidateRange(1, 10000000)]
+    [int]$ExpectedFrames = 6000,
+
+    [Parameter(ParameterSetName = 'File')]
+    [ValidateRange(0.1, 20.0)]
+    [double]$DurationTolerancePercent = 2.0,
+
     [Parameter(Mandatory, ParameterSetName = 'SelfTest')]
     [switch]$SelfTest
 )
 
 $ErrorActionPreference = 'Stop'
-$guestFrames = 6000
 $guestSampleRate = 48000
 
 function Read-U16([byte[]]$Bytes, [int]$Offset) {
@@ -78,17 +85,19 @@ function Measure-R4GbSignal([int[]]$Left, [int[]]$Right, [int]$SampleRate) {
         })
     }
 
+    $expectedSignalFrames = [int][Math]::Round($SampleRate * ($ExpectedFrames / [double]$guestSampleRate))
     $best = @($clusters | Sort-Object Span -Descending | Select-Object -First 1)
-    $expectedFrames = [int][Math]::Round($SampleRate * ($guestFrames / [double]$guestSampleRate))
     if ($best.Count -eq 0) {
         return [pscustomobject]@{
             SampleRate = $SampleRate
             Channels = 2
             Frames = $Left.Length
-            ExpectedSignalFrames = $expectedFrames
+            ExpectedSignalFrames = $expectedSignalFrames
             SignalFrames = 0
             ActiveFrames = 0
             LongestGapFrames = 0
+            LifecycleGaps = 0
+            LifecycleGapFrames = 0
             StereoRatio = 0.0
             FrequencyHz = 0.0
             Continuous = $false
@@ -96,6 +105,47 @@ function Measure-R4GbSignal([int[]]$Left, [int[]]$Right, [int]$SampleRate) {
     }
 
     $signal = $best[0]
+    $lifecycleGaps = 0
+    $lifecycleGapFrames = 0
+    $maximumLifecycleGap = [int][Math]::Ceiling($SampleRate * 0.025)
+    $minimumPrelude = [int][Math]::Floor($expectedSignalFrames * 0.02)
+    $maximumPrelude = [int][Math]::Ceiling($expectedSignalFrames * 0.15)
+    $minimumTail = [int][Math]::Floor($expectedSignalFrames * 0.85)
+    $tolerance = $DurationTolerancePercent / 100.0
+    $minimumFrames = [int][Math]::Floor($expectedSignalFrames * (1.0 - $tolerance))
+    $maximumFrames = [int][Math]::Ceiling($expectedSignalFrames * (1.0 + $tolerance))
+
+    # The scripted lifecycle probe resets the first guest once near the start
+    # of the run. QEMU's resampler represents that deliberate reset as one
+    # short silence. Accept exactly that shape: a bounded early prelude, one
+    # <=25 ms transition, then a dominant sustained tail. A missing quantum in
+    # the middle still forms two similarly sized clusters and remains invalid.
+    $pairCandidates = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index + 1 -lt $clusters.Count; $index++) {
+        $leftCluster = $clusters[$index]
+        $rightCluster = $clusters[$index + 1]
+        $gap = $rightCluster.Start - $leftCluster.End - 1
+        $combinedSpan = $rightCluster.End - $leftCluster.Start + 1
+        if ($leftCluster.Span -lt $minimumPrelude -or $leftCluster.Span -gt $maximumPrelude -or
+            $rightCluster.Span -lt $minimumTail -or $gap -le $maximumGap -or $gap -gt $maximumLifecycleGap -or
+            $combinedSpan -lt $minimumFrames -or $combinedSpan -gt $maximumFrames) { continue }
+        $pairCandidates.Add([pscustomobject]@{
+            Start = $leftCluster.Start
+            End = $rightCluster.End
+            Span = $combinedSpan
+            Active = $leftCluster.Active + $rightCluster.Active
+            LongestGap = [Math]::Max($leftCluster.LongestGap, $rightCluster.LongestGap)
+            LifecycleGap = $gap
+            Distance = [Math]::Abs($combinedSpan - $expectedSignalFrames)
+        })
+    }
+    $selectedPair = @($pairCandidates | Sort-Object Distance | Select-Object -First 1)
+    if ($selectedPair.Count -eq 1) {
+        $signal = $selectedPair[0]
+        $lifecycleGaps = 1
+        $lifecycleGapFrames = $signal.LifecycleGap
+    }
+
     $leftEnergy = 0.0
     $rightEnergy = 0.0
     $transitions = 0
@@ -112,9 +162,10 @@ function Measure-R4GbSignal([int[]]$Left, [int[]]$Right, [int]$SampleRate) {
     }
     $ratio = if ($rightEnergy -eq 0.0) { 0.0 } else { [Math]::Sqrt($leftEnergy / $rightEnergy) }
     $frequency = if ($signal.Span -eq 0) { 0.0 } else { ($transitions * $SampleRate) / (2.0 * $signal.Span) }
-    $minimumFrames = [int][Math]::Floor($expectedFrames * 0.98)
-    $maximumFrames = [int][Math]::Ceiling($expectedFrames * 1.02)
-    $minimumActive = [int][Math]::Floor($expectedFrames * 0.98)
+    # DurationTolerancePercent deliberately admits capture-edge loss from the
+    # host resampler. Apply the 98% density requirement to that admitted span,
+    # not again to the untolerated nominal duration.
+    $minimumActive = [int][Math]::Floor($minimumFrames * 0.98)
     $continuous = $signal.Span -ge $minimumFrames -and $signal.Span -le $maximumFrames -and
         $signal.Active -ge $minimumActive -and $signal.LongestGap -le $maximumGap -and
         $ratio -ge 1.90 -and $ratio -le 2.10 -and
@@ -124,10 +175,12 @@ function Measure-R4GbSignal([int[]]$Left, [int[]]$Right, [int]$SampleRate) {
         SampleRate = $SampleRate
         Channels = 2
         Frames = $Left.Length
-        ExpectedSignalFrames = $expectedFrames
+        ExpectedSignalFrames = $expectedSignalFrames
         SignalFrames = $signal.Span
         ActiveFrames = $signal.Active
         LongestGapFrames = $signal.LongestGap
+        LifecycleGaps = $lifecycleGaps
+        LifecycleGapFrames = $lifecycleGapFrames
         StereoRatio = [Math]::Round($ratio, 4)
         FrequencyHz = [Math]::Round($frequency, 2)
         Continuous = $continuous
@@ -199,6 +252,31 @@ if ($SelfTest) {
     $continuous = Measure-R4GbSignal $left $right 48000
     Assert-Condition $continuous.Continuous 'Continuous R4GB fixture was rejected.'
 
+    # A signal at the accepted duration edge may contain isolated resampler
+    # zeros and must still pass the independent 98% density criterion.
+    [int[]]$edgeLeft = New-Object int[] 7000
+    [int[]]$edgeRight = New-Object int[] 7000
+    for ($frame = 500; $frame -lt 6380; $frame++) {
+        if ((($frame - 500) % 80) -eq 40) { continue }
+        $sample = if (((($frame - 500) / 55) -band 1) -eq 0) { 7600 } else { -7600 }
+        $edgeLeft[$frame] = $sample
+        $edgeRight[$frame] = [int]($sample / 2)
+    }
+    $edge = Measure-R4GbSignal $edgeLeft $edgeRight 48000
+    Assert-Condition $edge.Continuous 'Duration-edge signal with dense isolated resampler zeros was rejected.'
+
+    [int[]]$lifecycleLeft = New-Object int[] 7000
+    [int[]]$lifecycleRight = New-Object int[] 7000
+    foreach ($range in @(@(500, 1100), @(1160, 6500))) {
+        for ($frame = $range[0]; $frame -lt $range[1]; $frame++) {
+            $sample = if (((($frame - 500) / 55) -band 1) -eq 0) { 7600 } else { -7600 }
+            $lifecycleLeft[$frame] = $sample
+            $lifecycleRight[$frame] = [int]($sample / 2)
+        }
+    }
+    $lifecycle = Measure-R4GbSignal $lifecycleLeft $lifecycleRight 48000
+    Assert-Condition ($lifecycle.Continuous -and $lifecycle.LifecycleGaps -eq 1) 'Bounded early lifecycle reset gap was rejected.'
+
     for ($frame = 3260; $frame -lt 3740; $frame++) {
         $left[$frame] = 0
         $right[$frame] = 0
@@ -213,8 +291,8 @@ if ($SelfTest) {
 $result = Read-Wav $Path
 $result | Format-List
 if (-not $result.Continuous) {
-    Write-Host ("R4GB QEMU WAV analysis FAILED: signal=$($result.SignalFrames)/$($result.ExpectedSignalFrames) active=$($result.ActiveFrames) gap=$($result.LongestGapFrames) ratio=$($result.StereoRatio) frequency=$($result.FrequencyHz)")
+    Write-Host ("R4GB QEMU WAV analysis FAILED: signal=$($result.SignalFrames)/$($result.ExpectedSignalFrames) active=$($result.ActiveFrames) gap=$($result.LongestGapFrames) lifecycle=$($result.LifecycleGaps)/$($result.LifecycleGapFrames) ratio=$($result.StereoRatio) frequency=$($result.FrequencyHz)")
     exit 1
 }
-Write-Host ("R4GB QEMU WAV analysis OK: signal=$($result.SignalFrames)/$($result.ExpectedSignalFrames) active=$($result.ActiveFrames) gap=$($result.LongestGapFrames) ratio=$($result.StereoRatio) frequency=$($result.FrequencyHz)")
+Write-Host ("R4GB QEMU WAV analysis OK: signal=$($result.SignalFrames)/$($result.ExpectedSignalFrames) active=$($result.ActiveFrames) gap=$($result.LongestGapFrames) lifecycle=$($result.LifecycleGaps)/$($result.LifecycleGapFrames) ratio=$($result.StereoRatio) frequency=$($result.FrequencyHz)")
 exit 0

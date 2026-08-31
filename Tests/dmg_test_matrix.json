@@ -1,0 +1,330 @@
+{
+  "schema": 1,
+  "target": {
+    "hardware": "Nintendo Game Boy DMG-01",
+    "cpu_revision": "DMG-CPU-C",
+    "startup": "documented post-boot state without a boot ROM",
+    "display": "monochrome DMG",
+    "out_of_scope": ["CGB", "SGB", "AGB", "link cable", "save states"]
+  },
+  "aggregate_digest": "XOR of SHA-256(path || NUL || file bytes), lowercase hexadecimal",
+  "policy": "Every applicable automated DMG case is required. A skip is legal only for foreign hardware, an unsupported peripheral, a reference utility requiring physical hardware or the explicitly deferred 0.72.11 manual visual protocol. Title-specific exceptions are forbidden.",
+  "sources": [
+    {
+      "id": "sm83-single-step",
+      "upstream": "https://github.com/SingleStepTests/sm83",
+      "revision": "f9c30210245dd691661db39f5ace022c465ecc2f",
+      "license": "MIT",
+      "catalog_files": 500,
+      "catalog_cases": 500000,
+      "required_cases": 500000,
+      "hashes": [
+        {"algorithm":"git-sha1","scope":"upstream revision","value":"f9c30210245dd691661db39f5ace022c465ecc2f"},
+        {"algorithm":"r4gb-sha256-xor","scope":"500 JSON vector files","value":"2b1ded5c16b9012fa355b248ef4f582c699d2e1e6c3711676ecf78ee48c71334"}
+      ]
+    },
+    {
+      "id": "mooneye",
+      "upstream": "https://github.com/Gekkio/mooneye-test-suite",
+      "revision": "31510e12eea6286d36eea060a6adde755e1067aa",
+      "license": "MIT",
+      "catalog_files": 115,
+      "catalog_cases": 115,
+      "required_cases": 94,
+      "hashes": [
+        {"algorithm":"sha256","scope":"official archive","value":"18aa29462dfe1fcd32a2cb3621733abdc72410074918b9245aa99a6920f7d3f2"},
+        {"algorithm":"sha256","scope":"extracted tree","value":"5c4f11d242af8d2b28cab6b47c791e74eac27334122ab7b44b6518cb9fa8217d"}
+      ]
+    },
+    {
+      "id": "dmg-acid2",
+      "upstream": "https://github.com/mattcurrie/dmg-acid2",
+      "revision": "8a98ce731f96dde032ffb22ec36dc985d78fdb18",
+      "license": "MIT",
+      "catalog_files": 1,
+      "catalog_cases": 1,
+      "required_cases": 1,
+      "hashes": [
+        {"algorithm":"sha256","scope":"dmg-acid2-v1.0.gb","value":"464e14b7d42e7feea0b7ede42be7071dc88913f75b9ffa444299424b63d1dff1"}
+      ]
+    },
+    {
+      "id": "mealybug-tearoom",
+      "upstream": "https://github.com/mattcurrie/mealybug-tearoom-tests",
+      "revision": "70e88fb90b59d19dfbb9c3ac36c64105202bb1f4",
+      "license": "MIT",
+      "catalog_files": 32,
+      "catalog_cases": 32,
+      "required_cases": 25,
+      "hashes": [
+        {"algorithm":"sha256","scope":"31-ROM prebuilt PPU tree","value":"6dec0402671f587e0a352a5d5ced58026485f605ff784db9605dde1591dffdde"},
+        {"algorithm":"sha256","scope":"generated mbc3_rtc.gb","value":"6cde433ad6464a553b7bdba77f0f101b447d8c5cfa614302692174415ce77915"}
+      ]
+    },
+    {
+      "id": "samesuite",
+      "upstream": "https://github.com/LIJI32/SameSuite",
+      "revision": "f15645fb049a47ea235f6d2c9a033e72d8087901",
+      "license": "X11",
+      "catalog_files": 78,
+      "catalog_cases": 78,
+      "required_cases": 3,
+      "hashes": [
+        {"algorithm":"sha256","scope":"RGBDS-built 78-ROM tree","value":"dd065d2f55972c6fea1fd22cb44b7dc8431c36fe6fed82724bc3eefd3ef47b08"}
+      ]
+    },
+    {
+      "id": "rtc3test",
+      "upstream": "https://github.com/aaaaaa123456789/rtc3test",
+      "revision": "80ae792bf1b3c3387929b912e6df001af3511e24",
+      "license": "Unlicense",
+      "catalog_files": 1,
+      "catalog_cases": 3,
+      "required_cases": 3,
+      "hashes": [
+        {"algorithm":"sha256","scope":"rtc3test-v004.gb","value":"a271013fb37ea1d927b854798401320b220d57abb3ca77f3d318ceb8a9def30d"}
+      ]
+    }
+  ],
+  "protocols": [
+    {
+      "id": "sm83-exact-step",
+      "success": "Exact final registers, memory writes and ordered M-cycle bus events for one legal base or CB opcode.",
+      "timeout": "Exactly one instruction per vector; each JSON input is capped at 4 MiB."
+    },
+    {
+      "id": "rom-catalog-integrity",
+      "success": "Every selected ROM parses with a valid cartridge identity and the pinned file count and aggregate digest match.",
+      "timeout": "No guest execution; each ROM is capped at 16 MiB."
+    },
+    {
+      "id": "mooneye-cpu-result",
+      "success": "The documented Fibonacci result 3,5,8,13,21,34 is reached; 42 in every result register is failure.",
+      "timeout": "20,000,000 SM83 instructions per ROM."
+    },
+    {
+      "id": "mooneye-machine-result",
+      "success": "At the LD B,B result breakpoint the documented Fibonacci register result is present; all-42, illegal opcodes and timeout fail.",
+      "timeout": "60,000,000 SM83 instructions per ROM."
+    },
+    {
+      "id": "dmg-pixel-exact",
+      "success": "All 23,040 DMG shade pixels exactly match the pinned reference PNG at the software breakpoint after its minimum frame count.",
+      "timeout": "5,000,000 SM83 instructions per ROM."
+    },
+    {
+      "id": "rtc3-ui-three-groups",
+      "success": "All three RTC3Test groups return to their result screen without any red result tile.",
+      "timeout": "10 guest seconds for menus and 180 guest seconds for each test group."
+    }
+  ],
+  "case_sets": [
+    {
+      "suite_id": "sm83-single-step-v1",
+      "source_ids": ["sm83-single-step"],
+      "protocol_id": "sm83-exact-step",
+      "selector": "Tests/SM83-SingleStep/v1/*.json; all 500 records in each file",
+      "revision": "DMG-CPU-C",
+      "target_component": "SM83 CPU and M-cycle bus",
+      "timeout": "one instruction per vector",
+      "disposition": "required",
+      "expected_files": 500,
+      "expected_records": 500000,
+      "expected_digest": "2b1ded5c16b9012fa355b248ef4f582c699d2e1e6c3711676ecf78ee48c71334"
+    },
+    {
+      "suite_id": "mooneye-31510e1",
+      "source_ids": ["mooneye"],
+      "protocol_id": "rom-catalog-integrity",
+      "selector": "all 115 upstream binary ROMs",
+      "revision": "classified by the exclusion table",
+      "target_component": "reference catalog integrity",
+      "timeout": "no guest execution; 16 MiB input ceiling",
+      "disposition": "catalog-integrity",
+      "expected_files": 115,
+      "expected_records": 0,
+      "expected_digest": "eb4272bf404f880598810478fcde2422383b09bc0197ac863400f2623cf6eeb7"
+    },
+    {
+      "suite_id": "dmg-acid2-v1.0",
+      "source_ids": ["dmg-acid2"],
+      "protocol_id": "rom-catalog-integrity",
+      "selector": "official v1.0 ROM",
+      "revision": "DMG-CPU-C",
+      "target_component": "reference ROM integrity",
+      "timeout": "no guest execution; 16 MiB input ceiling",
+      "disposition": "catalog-integrity",
+      "expected_files": 1,
+      "expected_records": 0,
+      "expected_digest": "afce0619b2da3d46a18494a72af09ab952669f8e65feff9b182152467bb80195"
+    },
+    {
+      "suite_id": "mooneye-mapper-machine-dmg-c-31510e1",
+      "source_ids": ["mooneye"],
+      "protocol_id": "mooneye-machine-result",
+      "selector": "Tests/mooneye_mapper_dmg_07210.json; all 28 emulator-only MBC1/MBC1M/MBC2/MBC5 cases",
+      "revision": "DMG-CPU-C",
+      "target_component": "cartridge mappers and external RAM",
+      "timeout": "60,000,000 instructions per ROM",
+      "disposition": "required",
+      "expected_files": 28,
+      "expected_records": 28,
+      "expected_digest": "b38f63dbff403e4d5407a3bc0a9c548507d5bc9baf06cafe73c7abc105e61324"
+    },
+    {
+      "suite_id": "mooneye-cpu-daa-31510e1",
+      "source_ids": ["mooneye"],
+      "protocol_id": "mooneye-cpu-result",
+      "selector": "acceptance/instr/daa.gb",
+      "revision": "DMG-CPU-C",
+      "target_component": "SM83 DAA",
+      "timeout": "20,000,000 instructions",
+      "disposition": "required-redundant-fast-path",
+      "expected_files": 1,
+      "expected_records": 1,
+      "expected_digest": "7e2073be854c6003ee2ca5409e1fe12c020deac7a15ca2830f950df2afdb8f60"
+    },
+    {
+      "suite_id": "mooneye-cpu-reg-f-31510e1",
+      "source_ids": ["mooneye"],
+      "protocol_id": "mooneye-cpu-result",
+      "selector": "acceptance/bits/reg_f.gb",
+      "revision": "DMG-CPU-C",
+      "target_component": "SM83 flag register",
+      "timeout": "20,000,000 instructions",
+      "disposition": "required-redundant-fast-path",
+      "expected_files": 1,
+      "expected_records": 1,
+      "expected_digest": "f03516b4ed55d32ef2d5d905a00e4fb7e34f9b31084ef204e7303b7c129ac379"
+    },
+    {
+      "suite_id": "mooneye-cpu-boot-regs-dmgabc-31510e1",
+      "source_ids": ["mooneye"],
+      "protocol_id": "mooneye-cpu-result",
+      "selector": "acceptance/boot_regs-dmgABC.gb",
+      "revision": "DMG-CPU-C",
+      "target_component": "post-boot CPU profile",
+      "timeout": "20,000,000 instructions",
+      "disposition": "required-redundant-fast-path",
+      "expected_files": 1,
+      "expected_records": 1,
+      "expected_digest": "91cd0ac2d08d5f16a3728c840818b8bd242d72c93f2fbb956cfd220bb60c072b"
+    },
+    {
+      "suite_id": "mooneye-dmg-c-clock-io-31510e1",
+      "source_ids": ["mooneye"],
+      "protocol_id": "mooneye-machine-result",
+      "selector": "Tests/mooneye_dmg_c_0724.json; 34 required clock, interrupt, DMA, serial and I/O cases",
+      "revision": "DMG-CPU-C",
+      "target_component": "machine clock, timer, interrupts, DMA, serial and MMIO",
+      "timeout": "60,000,000 instructions per ROM",
+      "disposition": "required",
+      "expected_files": 34,
+      "expected_records": 34,
+      "expected_digest": "797c8d42244be70765fce9c3a183fc46be414a3172d5248e6c20bb6b5fd17960"
+    },
+    {
+      "suite_id": "mooneye-dmg-c-ppu-31510e1",
+      "source_ids": ["mooneye"],
+      "protocol_id": "mooneye-machine-result",
+      "selector": "Tests/mooneye_dmg_c_0725.json; all 32 live PPU/timing cases",
+      "revision": "DMG-CPU-C",
+      "target_component": "PPU, STAT, VBlank, OAM DMA and instruction timing",
+      "timeout": "60,000,000 instructions per ROM",
+      "disposition": "required",
+      "expected_files": 32,
+      "expected_records": 32,
+      "expected_digest": "4ff8241695a210e97eb136b2eaa89205e46d42d060329b56f5b1b9d998b695e7"
+    },
+    {
+      "suite_id": "dmg-ppu-screenshots-0725",
+      "source_ids": ["dmg-acid2", "mealybug-tearoom"],
+      "protocol_id": "dmg-pixel-exact",
+      "selector": "Tests/ppu_screenshots_0725.json; Acid2 plus 24 DMG Mealybug captures",
+      "revision": "DMG-CPU-C",
+      "target_component": "DMG PPU pixel output",
+      "timeout": "5,000,000 instructions per ROM",
+      "disposition": "required",
+      "expected_files": 25,
+      "expected_records": 25,
+      "expected_digest": "d79ef21d6dbdcc1e92c4e5487be5ae469712dd6e570f411e0a5d0d7ea8aeb1ba"
+    },
+    {
+      "suite_id": "mealybug-tearoom-70e88fb",
+      "source_ids": ["mealybug-tearoom"],
+      "protocol_id": "rom-catalog-integrity",
+      "selector": "all 31 upstream prebuilt PPU ROMs",
+      "revision": "DMG/CGB classification in exclusion table",
+      "target_component": "reference catalog integrity",
+      "timeout": "no guest execution; 16 MiB input ceiling",
+      "disposition": "catalog-integrity",
+      "expected_files": 31,
+      "expected_records": 0,
+      "expected_digest": "96b4b0e209199d274301c863cc4eb23d912ed7d85df073e05a0861b40aebc718"
+    },
+    {
+      "suite_id": "samesuite-f15645f",
+      "source_ids": ["samesuite"],
+      "protocol_id": "rom-catalog-integrity",
+      "selector": "all 78 RGBDS-built upstream ROMs",
+      "revision": "DMG/CGB/SGB classification in exclusion table",
+      "target_component": "reference catalog integrity",
+      "timeout": "no guest execution; 16 MiB input ceiling",
+      "disposition": "catalog-integrity",
+      "expected_files": 78,
+      "expected_records": 0,
+      "expected_digest": "89dc7a922d4998ba0ee8c3e15f8f3443b8352d37328be95948e930a0861628df"
+    },
+    {
+      "suite_id": "samesuite-dmg-apu-f15645f",
+      "source_ids": ["samesuite"],
+      "protocol_id": "mooneye-machine-result",
+      "selector": "Tests/samesuite_dmg_0726.json; two pre-CGB APU cases and EI-delay-HALT",
+      "revision": "DMG-CPU-C",
+      "target_component": "APU frame sequencer, NR52 and interrupt/HALT interaction",
+      "timeout": "60,000,000 instructions per ROM",
+      "disposition": "required",
+      "expected_files": 3,
+      "expected_records": 3,
+      "expected_digest": "daf82c17c94926200473388411e2f1ef68abfc4b5800965041def367587d8de4"
+    },
+    {
+      "suite_id": "rtc3test-v004",
+      "source_ids": ["rtc3test"],
+      "protocol_id": "rtc3-ui-three-groups",
+      "selector": "all three RTC3Test menu groups",
+      "revision": "DMG-CPU-C",
+      "target_component": "MBC3 RTC registers, latch, halt, rollover, overflow and sub-second behavior",
+      "timeout": "10 guest seconds for menus; 180 guest seconds per group",
+      "disposition": "required",
+      "expected_files": 1,
+      "expected_records": 3,
+      "expected_digest": "d2b8c08f538b974991e564ebb84458bbfed308a49a9655c9470518e09b7ab899"
+    },
+    {
+      "suite_id": "mealybug-mbc3-rtc-70e88fb",
+      "source_ids": ["mealybug-tearoom"],
+      "protocol_id": "mooneye-machine-result",
+      "selector": "generated mbc3_rtc.gb",
+      "revision": "DMG-CPU-C",
+      "target_component": "MBC3 RTC mapper",
+      "timeout": "60,000,000 instructions",
+      "disposition": "required",
+      "expected_files": 1,
+      "expected_records": 1,
+      "expected_digest": "e6018eca098c62fb384fa7af8a29410e0f422809d06e285783f3a73fc32cbc91"
+    }
+  ],
+  "exclusions": [
+    {"source_id":"mooneye","classification":"foreign DMG/MGB/SGB revision profile","cases":9,"revision":"DMG-CPU-0, MGB, SGB or SGB2","disposition":"excluded","reason":"Post-boot CPU, divider and MMIO values intentionally differ from the production DMG-CPU-C target."},
+    {"source_id":"mooneye","classification":"CGB/AGB-only misc cases","cases":8,"revision":"CGB or AGB","disposition":"excluded","reason":"The tests require color or Advance hardware outside the monochrome subsystem scope."},
+    {"source_id":"mooneye","classification":"MGB madness case","cases":1,"revision":"MGB","disposition":"excluded","reason":"The sprite/DMA probe explicitly targets Pocket hardware."},
+    {"source_id":"mooneye","classification":"manual sprite-priority protocol","cases":1,"revision":"DMG","disposition":"deferred-0.72.11","reason":"Upstream declares a visual/manual success protocol; it belongs to the final user sight-test subversion."},
+    {"source_id":"mooneye","classification":"boot-ROM dump utilities","cases":2,"revision":"physical hardware","disposition":"excluded","reason":"These are acquisition utilities that require a real boot ROM or hardware and are not emulator conformance tests."},
+    {"source_id":"mealybug-tearoom","classification":"CGB-only second capture variants","cases":7,"revision":"CGB","disposition":"excluded","reason":"The seven *2 ROMs only have CGB expected images; there is no DMG oracle to assert."},
+    {"source_id":"samesuite","classification":"CGB PCM-register APU cases","cases":68,"revision":"CGB","disposition":"excluded","reason":"Upstream uses CGB-only PCM12/PCM34 observation; only the two documented pre-CGB APU cases are applicable."},
+    {"source_id":"samesuite","classification":"CGB DMA cases","cases":4,"revision":"CGB","disposition":"excluded","reason":"GDMA and HDMA are color-model facilities."},
+    {"source_id":"samesuite","classification":"CGB BGPI case","cases":1,"revision":"CGB","disposition":"excluded","reason":"BGPI is a color-palette register absent on DMG."},
+    {"source_id":"samesuite","classification":"SGB command cases","cases":2,"revision":"SGB","disposition":"excluded","reason":"Super Game Boy command transport is outside the monochrome handheld target."}
+  ]
+}

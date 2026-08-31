@@ -825,6 +825,21 @@ test "pulse wave and noise generators follow documented digital sequences" {
     try std.testing.expectEqual(stopped_lfsr, unit.noise.lfsr);
 }
 
+test "saturated increasing pulse envelope stays at full volume" {
+    var unit: Apu = .{};
+    unit.write(0x26, 0x80, 0);
+    unit.write(0x11, 0x80, 0);
+    unit.write(0x12, 0xF8, 0);
+    unit.write(0x14, 0x80, 0);
+    try std.testing.expect(unit.pulse[0].enabled);
+    try std.testing.expectEqual(@as(u4, 15), unit.pulse[0].volume);
+
+    var clocks: usize = 0;
+    while (clocks < 32) : (clocks += 1) unit.clockEnvelopes();
+    try std.testing.expectEqual(@as(u4, 15), unit.pulse[0].volume);
+    try std.testing.expect(unit.pulse[0].enabled);
+}
+
 test "active DMG wave RAM exposes only the fetched byte and restart corruption" {
     var unit: Apu = .{};
     unit.write(0x26, 0x80, 0);

@@ -103,6 +103,7 @@ pub const Guest = struct {
     save_session: ?persistence.Session = null,
     runtime_guest: runtime_adapter.Adapter = undefined,
     runtime_guest_ready: bool = false,
+    completion_witness: ?runtime_adapter.CompletionWitness = null,
     input: host_adapter.HostAdapter = .{},
     video: host_adapter.VideoAdapter = .{},
     palette: [host_api.palette_entries]u32 = .{0} ** host_api.palette_entries,
@@ -183,6 +184,12 @@ pub const Guest = struct {
         };
     }
 
+    pub fn setCompletionWitness(self: *Guest, witness: runtime_adapter.CompletionWitness) !void {
+        if (self.state != .running or !self.runtime_guest_ready) return error.NotRunning;
+        try self.runtime_guest.setCompletionWitness(witness);
+        self.completion_witness = witness;
+    }
+
     pub fn focusGained(self: *Guest, tick: u64) void {
         self.input.last_host_tick = tick;
         self.input.focusGained();
@@ -251,6 +258,7 @@ pub const Guest = struct {
         if (self.generation == 0) self.generation = 1;
         if (self.save_session) |*session| session.last_flush_guest_tick = 0;
         self.runtime_guest = runtime_adapter.Adapter.init(old_machine);
+        if (self.completion_witness) |witness| self.runtime_guest.setCompletionWitness(witness) catch unreachable;
         if (self.presenter) |presenter| {
             self.video.bind(&old_machine.ppu, &self.palette, presenter, self.generation) catch return reset_error_video;
         }

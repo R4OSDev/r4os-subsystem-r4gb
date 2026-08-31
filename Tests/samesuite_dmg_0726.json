@@ -11,6 +11,11 @@
       "path": "apu/div_write_trigger_10.gb",
       "disposition": "required",
       "reason": "DMG NR52 power-on suppression of the first DIV-APU edge"
+    },
+    {
+      "path": "interrupt/ei_delay_halt.gb",
+      "disposition": "required",
+      "reason": "DMG delayed-EI interrupt buffering immediately before HALT"
     }
   ]
 }

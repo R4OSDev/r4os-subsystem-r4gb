@@ -233,6 +233,7 @@ pub const Machine = struct {
     }
 
     fn readIo(self: *Machine, offset: u8) u8 {
+        if (isUnusedDmgIo(offset)) return 0xFF;
         return switch (offset) {
             0x00 => self.joypad.read(),
             0x01 => self.serial.data,
@@ -260,6 +261,7 @@ pub const Machine = struct {
     }
 
     fn writeIo(self: *Machine, offset: u8, value: u8) void {
+        if (isUnusedDmgIo(offset)) return;
         switch (offset) {
             0x00 => if (self.joypad.write(value)) {
                 self.interrupts.requestBit(4);
@@ -361,6 +363,37 @@ pub const Machine = struct {
         self.interrupts.acknowledge(bit);
     }
 };
+
+/// On monochrome hardware these addresses are not backed by writable MMIO.
+/// Their data lines remain pulled high, including after an attempted write.
+fn isUnusedDmgIo(offset: u8) bool {
+    return switch (offset) {
+        0x03, 0x08...0x0E, 0x15, 0x1F, 0x27...0x29, 0x4C...0x7F => true,
+        else => false,
+    };
+}
+
+test "unused DMG MMIO remains pulled high after writes" {
+    const testing = @import("std").testing;
+    const allocator = testing.allocator;
+    var image: [32 * 1024]u8 = .{0} ** (32 * 1024);
+    @memcpy(image[cartridge.logo_offset .. cartridge.logo_offset + cartridge.logo.len], cartridge.logo[0..]);
+    image[0x147] = 0;
+    image[0x148] = 0;
+    image[0x149] = 0;
+    image[0x14D] = cartridge.headerChecksum(image[0..]);
+    const checksum = cartridge.globalChecksum(image[0..]);
+    image[0x14E] = @truncate(checksum >> 8);
+    image[0x14F] = @truncate(checksum);
+    var machine = Machine.init(.dmg_c, try cartridge.Cartridge.init(allocator, image[0..]));
+    defer machine.deinit();
+
+    const offsets = [_]u8{ 0x03, 0x08, 0x0E, 0x15, 0x1F, 0x27, 0x29, 0x4C, 0x7F };
+    for (offsets) |offset| {
+        machine.write(0xFF00 + @as(u16, offset), 0);
+        try testing.expectEqual(@as(u8, 0xFF), machine.read(0xFF00 + @as(u16, offset)));
+    }
+}
 
 const DmaBus = enum { main, vram };
 

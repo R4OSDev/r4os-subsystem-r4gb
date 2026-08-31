@@ -9,6 +9,11 @@ const std = @import("std");
 const cartridge = @import("cartridge.zig");
 
 pub const image_bytes: usize = 32 * 1024;
+pub const directional_witness_address: u16 = 0xC000;
+pub const completion_witness_address: u16 = 0xC001;
+pub const action_witness_address: u16 = 0xC002;
+pub const timer_witness_address: u16 = 0xC003;
+pub const completion_witness_value: u8 = 0xA5;
 
 pub const Kind = enum {
     rom_only,
@@ -54,13 +59,24 @@ pub fn build(out: []u8, kind: Kind) !void {
     if (out.len != image_bytes) return error.InvalidSize;
     @memset(out, 0);
 
-    // Interrupt handlers return immediately. The timer interrupt wakes HALT
-    // so the main loop samples the selected physical joypad line repeatedly.
+    // The timer interrupt increments an observable witness before returning;
+    // all other interrupt vectors are deliberately minimal.
     out[0x40] = 0xD9;
     out[0x48] = 0xD9;
-    out[0x50] = 0xD9;
+    out[0x50] = 0xC3; // JP $0300
+    out[0x51] = 0x00;
+    out[0x52] = 0x03;
     out[0x58] = 0xD9;
     out[0x60] = 0xD9;
+    var handler_cursor: usize = 0x300;
+    emit(out, &handler_cursor, &.{
+        0xF5, // PUSH AF
+        0xFA, 0x03, 0xC0, // LD A,($C003)
+        0x3C, // INC A
+        0xEA, 0x03, 0xC0, // LD ($C003),A
+        0xF1, // POP AF
+        0xD9, // RETI
+    });
 
     out[0x100] = 0xC3; // JP $0150
     out[0x101] = 0x50;
@@ -84,6 +100,35 @@ pub fn build(out: []u8, kind: Kind) !void {
         0xF3, // DI
         0x31, 0xFE, 0xFF, // LD SP,$FFFE
         0xAF, // XOR A
+        0xEA, 0x00, 0xC0, // clear directional witness
+        0xEA, 0x01, 0xC0, // clear completion witness
+        0xEA, 0x02, 0xC0, // clear action witness
+        0xEA, 0x03, 0xC0, // clear timer witness
+        0xE0, 0x40, // LCD off while defining tile data
+        0x21, 0x00, 0x80, // LD HL,$8000: tile zero
+        0x06, 0x08, // LD B,8 rows
+        0x3E, 0xAA, // alternating low bitplane
+        0x22, // LD (HL+),A
+        0xAF, // zero high bitplane
+        0x22, // LD (HL+),A
+        0x05, // DEC B
+        0x20, 0xF8, // JR NZ, eight bytes back
+        0x21, 0x00, 0x98, // LD HL,$9800: background map
+        0x01, 0x00, 0x04, // LD BC,$0400 map bytes
+        0x36, 0x00, // LD (HL),0
+        0x23, // INC HL
+        0x0B, // DEC BC
+        0x78, // LD A,B
+        0xB1, // OR C
+        0x20, 0xF8, // JR NZ, eight bytes back
+        0x3E, 0xE4,
+        0xE0, 0x47, // BGP: identity shade mapping
+        0xAF,
+        0xE0, 0x42, // SCY=0
+        0xE0, 0x43, // SCX=0
+        0x3E, 0x91,
+        0xE0, 0x40, // LCD and background on
+        0xAF,
         0xE0, 0x26, // LDH ($FF26),A: APU off
         0x3E, 0x80,
         0xE0, 0x26, // APU on
@@ -93,8 +138,10 @@ pub fn build(out: []u8, kind: Kind) !void {
         0xE0, 0x25, // channel 1 to both outputs
         0x3E, 0x80,
         0xE0, 0x11, // duty
-        0x3E, 0xF0,
-        0xE0, 0x12, // envelope / DAC
+        // Saturated increasing envelope: the test tone remains audible for
+        // the complete long-run instead of fading to zero after 1.875 s.
+        0x3E, 0xF8,
+        0xE0, 0x12, // constant-volume envelope / DAC
         0x3E, 0xD6,
         0xE0, 0x13,
         0x3E, 0x86,
@@ -127,7 +174,7 @@ pub fn build(out: []u8, kind: Kind) !void {
         0xE0, 0x06, // TMA
         0xE0, 0x05, // TIMA
         0x3E, 0x05,
-        0xE0, 0x07, // timer enable, 4096 Hz input
+        0xE0, 0x07, // timer enable, 262144 Hz input
         0x3E, 0x04,
         0xEA, 0xFF, 0xFF, // IE: timer
         0xFB, // EI
@@ -137,10 +184,35 @@ pub fn build(out: []u8, kind: Kind) !void {
         0x3E, 0x20,
         0xE0, 0x00, // select directional joypad line
         0xF0, 0x00,
-        0xEA, 0x00, 0xC0, // observable sample in private WRAM
+        0xEA, 0x00, 0xC0, // directional input witness
+        0x3E, 0x10,
+        0xE0, 0x00, // select action joypad line
+        0xF0, 0x00,
+        0xEA, 0x02, 0xC0, // action input witness
+        0xE6, 0x0C, // Start and Select both pressed?
+        0xC2, 0x00, 0x00, // JP NZ,continue (patched below)
+        0xFA, 0x03, 0xC0, // timer witness must already be non-zero
+        0xB7, // OR A
+        0xCA, 0x00, 0x00, // JP Z,continue (patched below)
+        0xF3, // DI
+        0xAF,
+        0xEA, 0xFF, 0xFF, // IE=0
+        0xE0, 0x07, // timer off
+        0xE0, 0x0F, // IF=0
+        0x3E, completion_witness_value,
+        0xEA, 0x01, 0xC0, // defined guest completion witness
+        0x76, // stable completed HALT
+        0x18, 0xFD, // defensive loop back to HALT
+    });
+    const continue_address: u16 = @intCast(cursor);
+    emit(out, &cursor, &.{
         0x76, // HALT until timer or joypad interrupt
         0xC3, @truncate(loop_address), @truncate(loop_address >> 8),
     });
+    // Both conditional absolute jumps in the loop converge on the normal
+    // HALT path without coupling the fixture to its final byte position.
+    write16At(out, @as(usize, loop_address) + 21, continue_address);
+    write16At(out, @as(usize, loop_address) + 28, continue_address);
 
     finalize(out);
 }
@@ -149,6 +221,12 @@ fn emit(out: []u8, cursor: *usize, bytes: []const u8) void {
     std.debug.assert(cursor.* + bytes.len <= out.len);
     @memcpy(out[cursor.* .. cursor.* + bytes.len], bytes);
     cursor.* += bytes.len;
+}
+
+fn write16At(out: []u8, offset: usize, value: u16) void {
+    std.debug.assert(offset + 1 < out.len);
+    out[offset] = @truncate(value);
+    out[offset + 1] = @truncate(value >> 8);
 }
 
 fn finalize(bytes: []u8) void {

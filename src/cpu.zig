@@ -126,6 +126,12 @@ pub const Cpu = struct {
     }
 
     fn serviceInterrupt(self: *Cpu, bus: Bus, initial_bit: u3) ?u3 {
+        // When HALT immediately follows EI while an interrupt is pending, the
+        // HALT bug and delayed IME enable happen together. Hardware services
+        // the interrupt but pushes the address of HALT, so RETI executes HALT
+        // again. Normal HALT-bug instruction fetches consume this state in
+        // fetchOpcode instead.
+        if (self.halt_bug) self.registers.pc -%= 1;
         self.ime = false;
         self.ime_enable_pending = false;
         self.halt_bug = false;

@@ -161,6 +161,29 @@ test "HALT bug, STOP wake and interrupt stack order are deterministic" {
     try std.testing.expectEqual(@as(u16, 0xBFFE), memory.events[3].address);
 }
 
+test "EI followed by bugged HALT pushes the HALT address" {
+    var memory: CpuMemory = .{};
+    memory.bytes[0x100] = 0xFB; // EI
+    memory.bytes[0x101] = 0x76; // HALT
+    var processor = testCpu(0x100, 0xC000);
+
+    _ = processor.step(memory.bus(), 1);
+    try std.testing.expect(!processor.ime);
+    try std.testing.expect(processor.ime_enable_pending);
+    _ = processor.step(memory.bus(), 1);
+    try std.testing.expect(processor.ime);
+    try std.testing.expect(processor.halt_bug);
+    try std.testing.expectEqual(@as(u16, 0x0102), processor.registers.pc);
+
+    const accepted = processor.step(memory.bus(), 1);
+    try std.testing.expectEqual(core.cpu.ExecutionKind.interrupt, accepted.kind);
+    try std.testing.expectEqual(@as(u16, 0x0040), processor.registers.pc);
+    try std.testing.expectEqual(@as(u16, 0xBFFE), processor.registers.sp);
+    try std.testing.expectEqual(@as(u8, 0x01), memory.bytes[0xBFFF]);
+    try std.testing.expectEqual(@as(u8, 0x01), memory.bytes[0xBFFE]);
+    try std.testing.expect(!processor.halt_bug);
+}
+
 test "DAA and signed SP offsets cover carry boundaries" {
     var memory: CpuMemory = .{};
     memory.bytes[0x100] = 0x27;
@@ -263,6 +286,9 @@ test "image bounds, both checksums, size codes and mapper consistency are determ
     const bytes = try makeRom(allocator, 0x00, 0x00, 0x00, 0x00);
     defer allocator.free(bytes);
 
+    for ([_]usize{ 0, 1, core.cartridge.logo_offset, core.cartridge.header_size - 1 }) |cut| {
+        try std.testing.expectError(error.TooSmall, core.cartridge.parse(bytes[0..cut]));
+    }
     try std.testing.expectError(error.SizeMismatch, core.cartridge.parse(bytes[0 .. bytes.len - 1]));
     bytes[0] ^= 1;
     try std.testing.expectError(error.InvalidGlobalChecksum, core.cartridge.parse(bytes));
@@ -278,6 +304,11 @@ test "image bounds, both checksums, size codes and mapper consistency are determ
     bytes[0x148] = 0xFF;
     finalize(bytes);
     try std.testing.expectError(error.InvalidRomSizeCode, core.cartridge.parse(bytes));
+
+    bytes[0x148] = 0;
+    bytes[0x149] = 0xFF;
+    finalize(bytes);
+    try std.testing.expectError(error.InvalidRamSizeCode, core.cartridge.parse(bytes));
 
     const too_large = try allocator.alloc(u8, core.cartridge.max_rom_bytes + 1);
     defer allocator.free(too_large);
@@ -576,6 +607,59 @@ test "machine timer, serial and DMA remain identical across host slice partition
     try std.testing.expectEqual(left.dma.active, right.dma.active);
     try std.testing.expectEqualSlices(u8, left.ppu.oam[0..], right.ppu.oam[0..]);
     try std.testing.expectEqual(@as(u8, 0xD4), left.ppu.oam[0]);
+}
+
+test "open E2E ROM exercises PPU APU timer input battery RTC and defined completion" {
+    const allocator = std.testing.allocator;
+    var image: [core.fixture_rom.image_bytes]u8 = undefined;
+    try core.fixture_rom.build(image[0..], .battery_rtc);
+    var machine = core.machine.Machine.init(.dmg_c, try core.cartridge.Cartridge.init(allocator, image[0..]));
+    defer machine.deinit();
+
+    var instructions: usize = 0;
+    while ((machine.ppu.frames_completed < 3 or machine.bus.work_ram[3] == 0) and instructions < 1_000_000) : (instructions += 1) {
+        try std.testing.expect(machine.stepCpu().kind != .illegal);
+    }
+    try std.testing.expect(machine.ppu.frames_completed >= 3);
+    try std.testing.expect(machine.ppu.frame_revision != 0);
+    try std.testing.expect(machine.bus.work_ram[3] != 0);
+    try std.testing.expect(machine.apu.powered);
+    try std.testing.expect(machine.apu.stats.samples_generated != 0);
+    var saw_white = false;
+    var saw_light = false;
+    for (machine.ppu.framebuffer) |pixel| {
+        saw_white = saw_white or pixel == 0;
+        saw_light = saw_light or pixel == 1;
+    }
+    try std.testing.expect(saw_white and saw_light);
+    try std.testing.expectEqual(@as(u8, 0x5A), machine.cartridge.readExternal(0xA000));
+    try std.testing.expectEqual(@as(u8, 7), machine.cartridge.mapper.rtc.seconds);
+
+    machine.setButton(.right, true, false);
+    instructions = 0;
+    while ((machine.bus.work_ram[0] & 1) != 0 and instructions < 100_000) : (instructions += 1) {
+        try std.testing.expect(machine.stepCpu().kind != .illegal);
+    }
+    try std.testing.expectEqual(@as(u8, 0), machine.bus.work_ram[0] & 1);
+
+    machine.setButton(.a, true, false);
+    instructions = 0;
+    while ((machine.bus.work_ram[2] & 1) != 0 and instructions < 100_000) : (instructions += 1) {
+        try std.testing.expect(machine.stepCpu().kind != .illegal);
+    }
+    try std.testing.expectEqual(@as(u8, 0), machine.bus.work_ram[2] & 1);
+
+    machine.setButton(.start, true, false);
+    machine.setButton(.select, true, false);
+    instructions = 0;
+    while (machine.bus.work_ram[1] != core.fixture_rom.completion_witness_value and instructions < 100_000) : (instructions += 1) {
+        try std.testing.expect(machine.stepCpu().kind != .illegal);
+    }
+    try std.testing.expectEqual(core.fixture_rom.completion_witness_value, machine.bus.work_ram[1]);
+    try std.testing.expect(machine.stepCpu().kind != .illegal);
+    try std.testing.expect(machine.cpu.halted);
+    try std.testing.expectEqual(@as(u8, 0), machine.interrupts.enable);
+    try std.testing.expectEqual(@as(u8, 0xF8), machine.timer.readTac());
 }
 
 test "machine interrupt dispatch can cancel or retarget after the IE push" {

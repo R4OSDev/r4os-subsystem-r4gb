@@ -277,6 +277,8 @@ test "reset rebinds a fresh video generation and preserves flushed battery RAM" 
     var presenter = try r4os.subsystem_host.Presenter.init(surface, scratch[0..]);
     try guest.attachVideo(&presenter);
     const original_generation = guest.video.generation;
+    const completion = core.runtime_adapter.CompletionWitness{ .address = 0xC001, .value = 0xA5 };
+    try guest.setCompletionWitness(completion);
 
     guest.machine.?.cartridge.writeControl(0, 0x0A);
     guest.machine.?.cartridge.writeExternal(0xA000, 0x5A);
@@ -288,6 +290,8 @@ test "reset rebinds a fresh video generation and preserves flushed battery RAM" 
     try std.testing.expectEqual(@as(u8, 0x5A), guest.machine.?.cartridge.external_ram[0]);
     try std.testing.expectEqual(@as(u8, 0), guest.machine.?.ppu.framebuffer[0]);
     try std.testing.expectEqual(@as(usize, 0), guest.machine.?.apu.queuedFrames());
+    try std.testing.expectEqual(completion.address, guest.runtime_guest.completion_witness.?.address);
+    try std.testing.expectEqual(completion.value, guest.runtime_guest.completion_witness.?.value);
     try std.testing.expectEqual(@intFromPtr(&guest.machine.?.ppu.framebuffer[0]), @intFromPtr(presenter.surface.indexedPixels().?.ptr));
     try std.testing.expect(store.write_calls >= 1);
 }

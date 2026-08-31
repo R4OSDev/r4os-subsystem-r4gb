@@ -54,11 +54,16 @@ const apu_selftest_max_catchup_quanta: u16 = 16;
 const audio_service_timeout_ns: u64 = 50 * std.time.ns_per_ms;
 const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
 const product_audio_target_quanta: u16 = 2;
+// One DMG APU ring holds just over 17 ten-millisecond quanta. Preserve up to
+// 16 quanta across a bounded scheduler delay so two concurrent product guests
+// do not discard otherwise current PCM on a single-CPU system.
+const product_audio_max_catchup_quanta: u16 = 16;
 const host_selftest_marker_path = "C:\\TEMP\\R4GB.HOST";
 const host_selftest_marker = "R4GB host runtime: OK instances=model-2+window-1 slices=bounded input=physical+focus video=160x144+generation audio=app-audio lifecycle=pause+resume+reset+mute+close resources=closed\r\n";
 const e2e_fixture_a_path = "C:\\TEMP\\R4GB-E2E-A.GB";
 const e2e_fixture_b_path = "C:\\TEMP\\R4GB-E2E-B.GBC";
 const e2e_fixture_cgb_path = "C:\\TEMP\\R4GB-CGB-ONLY.GBC";
+const e2e_end_key = "end";
 
 const SelfTestHost = struct {
     system: *const r4os.r4sys.Context,
@@ -175,7 +180,7 @@ fn runProduct(app: *r4os.App) i32 {
         }, loadFailureCode(fault));
     };
 
-    var save_store = persistence_r4os.Store.init(files);
+    var save_store = persistence_r4os.AsyncStore.init(files, allocator);
     const save_generation = sys.ticks() | 1;
     var time_context = ProductTimeContext{ .sys = &sys };
     var guest = product_host.Guest.init(
@@ -195,13 +200,19 @@ fn runProduct(app: *r4os.App) i32 {
             @errorName(fault),
         }, code);
         if (e2e_trace.active) {
-            if (fault != error.CgbOnly or guest.resourcesOpen() or !writeE2eRejection(&sys, e2e_trace, fault)) {
+            if (fault != error.CgbOnly or e2e_trace.expected_end != .reject or guest.resourcesOpen() or !writeE2eRejection(&sys, e2e_trace, fault)) {
                 _ = writeE2eFailure(&sys, e2e_trace, "open", fault, save_store.failureStageName(), save_store.failureCode());
                 return error_e2e_trace;
             }
         }
         return status_result;
     };
+    if (e2e_trace.active and e2e_trace.expected_end == .witness) {
+        guest.setCompletionWitness(.{
+            .address = core.fixture_rom.completion_witness_address,
+            .value = core.fixture_rom.completion_witness_value,
+        }) catch unreachable;
+    }
 
     const surface = guest.initialSurface() catch {
         _ = guest.close();
@@ -245,7 +256,7 @@ fn runProduct(app: *r4os.App) i32 {
             .channels = core.apu.channels,
             .quantum_frames = runtime_api.default_quantum_frames,
             .target_quanta = product_audio_target_quanta,
-            .max_catchup_quanta = runtime_api.default_max_catchup_quanta,
+            .max_catchup_quanta = product_audio_max_catchup_quanta,
         },
         .queue_storage = audio_queue[0..],
         .scratch = audio_scratch[0..],
@@ -274,20 +285,51 @@ fn runProduct(app: *r4os.App) i32 {
     const audio_degraded = runtime.audio.state == .degraded;
     const runtime_stats = runtime.stats;
     const audio_stats = runtime.audio.stats;
+    const apu_stats = guest.machine.?.apu.stats;
+    const apu_queued_frames = guest.machine.?.apu.queuedFrames();
+    const maximum_step_gap_ns = guest.runtime_guest.maximum_step_gap_ns;
     const published_frames = window.video.stats.published_frames;
     const save_enabled = guest.save_session.?.enabled;
     const save_has_rtc = guest.machine.?.cartridge.header.type_info.has_timer;
     const save_ram_bytes = guest.machine.?.cartridge.external_ram.len;
     const save_digest = guest.machine.?.cartridge.rom_digest;
     const guest_cycles = guest.machine.?.guest_t_cycles;
+    // The shared runtime clock continues while a completed source drains its
+    // final PCM. The machine clock's last granted timestamp is therefore the
+    // precise endpoint for emulation-rate drift.
+    const guest_ns = guest.machine.?.guest_clock.last_host_nanoseconds orelse runtime.clock.guest_ns;
+    const ppu_frames = guest.machine.?.ppu.frames_completed;
+    const expected_guest_cycles: u64 = @intCast((@as(u128, guest_ns) * core.clock.frequency_hz) / std.time.ns_per_s);
+    const drift_cycles = if (guest_cycles >= expected_guest_cycles) guest_cycles - expected_guest_cycles else expected_guest_cycles - guest_cycles;
+    const completion_seen = guest.runtime_guest.source_finished and
+        guest.machine.?.bus.work_ram[core.fixture_rom.completion_witness_address - 0xC000] == core.fixture_rom.completion_witness_value;
+    const drained = guest.machine.?.apu.queuedFrames() == 0 and guest.runtime_guest.transport_pending_bytes == 0;
     runtime.shutdown();
     const close_result = guest.close();
     if (e2e_trace.active) {
+        const persistence_async_ok = !save_enabled or
+            (save_store.stats.started != 0 and save_store.stats.started == save_store.stats.completed and save_store.stats.errors == 0);
         const save_files = !save_enabled or persistenceFilesPresent(&files, &save_digest, save_ram_bytes, save_has_rtc);
-        const e2e_ok = exit_code == 0 and runtime_state == .closed and close_result == 0 and !guest.resourcesOpen() and
+        const expected_state: runtime_api.LifecycleState = switch (e2e_trace.expected_end) {
+            .witness => .completed,
+            .close => .closed,
+            .reject => .failed,
+        };
+        const end_ok = runtime_state == expected_state and switch (e2e_trace.expected_end) {
+            .witness => completion_seen and drained,
+            .close => !completion_seen,
+            .reject => false,
+        };
+        const focus_ok = e2e_trace.expected_end == .witness or !guest.input.focused;
+        const timing_ok = drift_cycles <= product_host.slice_budget_t_cycles + 24 and
+            guest.machine == null and ppu_frames + 2 >= guest_cycles / core.clock.frame_t_cycles;
+        const e2e_ok = exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
             runtime_stats.slices != 0 and guest.stats.maximum_slice_operations <= product_host.slice_budget_t_cycles + 24 and
-            guest.input.input_events >= 2 and !guest.input.focused and published_frames != 0 and
-            audio_stats.writes != 0 and !audio_degraded and save_files;
+            guest.input.input_events >= 2 and focus_ok and published_frames != 0 and timing_ok and
+            runtime_stats.dropped_presents == 0 and runtime_stats.poll_budget_exhaustions == 0 and
+            audio_stats.writes != 0 and audio_stats.write_failures == 0 and audio_stats.late_resyncs == 0 and
+            apu_stats.frames_dropped == 0 and
+            !audio_degraded and persistence_async_ok and save_files;
         if (!writeE2eRuntimeReport(
             &sys,
             e2e_trace,
@@ -297,9 +339,16 @@ fn runProduct(app: *r4os.App) i32 {
             save_has_rtc,
             save_files,
             guest_cycles,
+            guest_ns,
+            drift_cycles,
+            ppu_frames,
             runtime_stats,
             audio_stats,
+            apu_stats,
+            apu_queued_frames,
+            maximum_step_gap_ns,
             guest.stats,
+            save_store.stats,
             published_frames,
             close_result,
         )) return error_e2e_trace;
@@ -309,7 +358,7 @@ fn runProduct(app: *r4os.App) i32 {
         sys.println("R4GB: clean persistence close failed.");
         return error_save_close;
     }
-    if (runtime_state == .closed) return 0;
+    if (runtime_state == .closed or runtime_state == .completed) return 0;
 
     var failure_text: [64]u8 = undefined;
     const rendered = std.fmt.bufPrint(failure_text[0..], "Laufzeitfehler: {d}", .{exit_code}) catch "Laufzeitfehler";
@@ -321,8 +370,11 @@ fn runProduct(app: *r4os.App) i32 {
 }
 
 const E2eTrace = struct {
+    const ExpectedEnd = enum { close, witness, reject };
+
     active: bool = false,
     id: []const u8 = "",
+    expected_end: ExpectedEnd = .close,
 
     fn parse(request: r4os.subsystem_launch.Request) E2eTrace {
         const mode = (request.option(r4os.subsystem_launch.trace_mode_key) catch null) orelse return .{};
@@ -330,7 +382,20 @@ const E2eTrace = struct {
         const id = (request.option(r4os.subsystem_launch.trace_key) catch null) orelse return .{};
         if (id.len != 16) return .{};
         for (id) |byte| if (!std.ascii.isHex(byte)) return .{};
-        return .{ .active = true, .id = id };
+        const end_text = (request.option(e2e_end_key) catch null) orelse return .{};
+        const expected_end: ExpectedEnd = if (std.ascii.eqlIgnoreCase(end_text, "close"))
+            .close
+        else if (std.ascii.eqlIgnoreCase(end_text, "witness"))
+            .witness
+        else if (std.ascii.eqlIgnoreCase(end_text, "reject"))
+            .reject
+        else
+            return .{};
+        return .{ .active = true, .id = id, .expected_end = expected_end };
+    }
+
+    fn endName(self: E2eTrace) []const u8 {
+        return @tagName(self.expected_end);
     }
 };
 
@@ -380,37 +445,72 @@ fn writeE2eRuntimeReport(
     rtc: bool,
     save_files: bool,
     guest_cycles: u64,
+    guest_ns: u64,
+    drift_cycles: u64,
+    ppu_frames: u64,
     runtime_stats: runtime_api.RuntimeStats,
     audio_stats: runtime_api.AudioStats,
+    apu_stats: core.apu.AudioStats,
+    apu_queued_frames: usize,
+    maximum_step_gap_ns: u64,
     guest_stats: product_host.GuestStats,
+    persistence_stats: persistence_r4os.AsyncStats,
     published_frames: u64,
     close_result: i32,
 ) bool {
     var path_storage: [96]u8 = undefined;
     const path = e2eReportPath(trace, &path_storage) orelse return false;
-    var report_storage: [640]u8 = undefined;
+    var report_storage: [896]u8 = undefined;
     const extension = if (endsWithIgnoreCase(guest_path, ".gbc")) ".gbc" else ".gb";
-    const report = std.fmt.bufPrint(report_storage[0..],
-        "R4GB E2E runtime: {s} id={s} extension={s} battery={d} rtc={d} guest_cycles={d} slices={d} max_slice={d} input={d} frames={d} audio_writes={d} pauses={d} resumes={d} resets={d} save_files={d} close={d} resources=closed\r\n",
+    const prefix_len = (std.fmt.bufPrint(
+        report_storage[0..],
+        "R4GB E2E runtime: {s} id={s} extension={s} end={s} battery={d} rtc={d} guest_ns={d} guest_cycles={d} drift_cycles={d} ppu_frames={d} slices={d} max_slice={d} max_step_gap_ns={d} input={d} frames={d} dropped_presents={d} audio_writes={d} audio_busy={d} audio_failures={d} audio_late={d} audio_discarded={d} audio_suppressed={d} apu_generated={d} apu_rendered={d} apu_dropped={d} apu_queued={d}",
         .{
             if (ok) "OK" else "FAILED",
             trace.id,
             extension,
+            trace.endName(),
             @intFromBool(battery),
             @intFromBool(rtc),
+            guest_ns,
             guest_cycles,
+            drift_cycles,
+            ppu_frames,
             runtime_stats.slices,
             guest_stats.maximum_slice_operations,
+            maximum_step_gap_ns,
             runtime_stats.input_events,
             published_frames,
+            runtime_stats.dropped_presents,
             audio_stats.writes,
+            audio_stats.busy_writes,
+            audio_stats.write_failures,
+            audio_stats.late_resyncs,
+            audio_stats.discarded_bytes,
+            audio_stats.suppressed_bytes,
+            apu_stats.samples_generated,
+            apu_stats.frames_rendered,
+            apu_stats.frames_dropped,
+            apu_queued_frames,
+        },
+    ) catch return false).len;
+    const suffix_len = (std.fmt.bufPrint(
+        report_storage[prefix_len..],
+        " save_async_started={d} save_async_completed={d} save_async_coalesced={d} save_async_errors={d} save_async_max_queued={d} pauses={d} resumes={d} resets={d} save_files={d} close={d} resources=closed\r\n",
+        .{
+            persistence_stats.started,
+            persistence_stats.completed,
+            persistence_stats.coalesced,
+            persistence_stats.errors,
+            persistence_stats.maximum_queued,
             runtime_stats.pauses,
             runtime_stats.resumes,
             runtime_stats.resets,
             @intFromBool(save_files),
             close_result,
         },
-    ) catch return false;
+    ) catch return false).len;
+    const report = report_storage[0 .. prefix_len + suffix_len];
     return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
 }
 
@@ -807,7 +907,7 @@ fn hostSelfTest(app: *r4os.App) i32 {
             .channels = core.apu.channels,
             .quantum_frames = runtime_api.default_quantum_frames,
             .target_quanta = product_audio_target_quanta,
-            .max_catchup_quanta = runtime_api.default_max_catchup_quanta,
+            .max_catchup_quanta = product_audio_max_catchup_quanta,
         },
         .queue_storage = audio_queue[0..],
         .scratch = audio_scratch[0..],
@@ -891,7 +991,7 @@ fn persistenceSelfTest(app: *r4os.App) i32 {
         sys.println(@errorName(fault));
         return error_persistence_selftest;
     };
-    app.system().println("R4GB persistence runtime: OK sram=8192 rtc=1 lock=exclusive atomic=1");
+    app.system().println("R4GB persistence runtime: OK sram=8192 rtc=1 lock=exclusive atomic=1 async=worker+drain");
     return 0;
 }
 
@@ -908,7 +1008,7 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
 
     var first_cart = try core.cartridge.Cartridge.init(allocator, bytes);
     defer first_cart.deinit();
-    var first_store = persistence_r4os.Store.init(files);
+    var first_store = persistence_r4os.AsyncStore.init(files, allocator);
     first_store.removeTestFiles(&first_cart.rom_digest);
     defer first_store.removeTestFiles(&first_cart.rom_digest);
     const generation = (sys.ticks() | 1) +| 2;
@@ -934,6 +1034,14 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     first_cart.writeControl(0x4000, 0x0C);
     first_cart.writeExternal(0xA000, 0x41); // day bit 8 + halt
 
+    // Exercise three publications through the same fixed 8.3 transaction
+    // names. The second replace creates a backup; the third must retire and
+    // reuse it instead of failing a long-running RTC session.
+    try first_session.flush(&first_cart, wall, monotonic);
+    first_cart.rtc_dirty = true;
+    try first_session.flush(&first_cart, wall, monotonic);
+    first_cart.rtc_dirty = true;
+
     var competing_cart = try core.cartridge.Cartridge.init(allocator, bytes);
     defer competing_cart.deinit();
     var competing_store = persistence_r4os.Store.init(files);
@@ -946,6 +1054,8 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
         if (fault != error.Busy) return fault;
     }
     try first_session.close(&first_cart, generation, wall, monotonic);
+    if (first_store.stats.started == 0 or first_store.stats.started != first_store.stats.completed or first_store.stats.errors != 0)
+        return error.AsyncPersistenceMismatch;
 
     var reopened_cart = try core.cartridge.Cartridge.init(allocator, bytes);
     defer reopened_cart.deinit();

@@ -8,6 +8,7 @@
     {"path":"bits/reg_f.gb","disposition":"required","reason":"F register invariant through Machine"},
     {"path":"bits/mem_oam.gb","disposition":"required","reason":"all DMG OAM bits remain readable and writable"},
     {"path":"instr/daa.gb","disposition":"required","reason":"DAA through timed Machine bus"},
+    {"path":"bits/unused_hwio-GS.gb","disposition":"required","reason":"unused DMG/SGB MMIO bits and write masks"},
     {"path":"div_timing.gb","disposition":"required","reason":"DIV reset and exact M-cycle phase"},
     {"path":"pop_timing.gb","disposition":"required","reason":"stack reads at exact DIV boundaries"},
     {"path":"ei_sequence.gb","disposition":"required","reason":"repeated EI delay"},

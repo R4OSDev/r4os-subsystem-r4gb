@@ -12,7 +12,7 @@ host establishes a documented post-boot state and starts a cartridge at
 cartridge header validation decides whether a file can run in DMG mode.
 CGB-only cartridges are rejected.
 
-Version 0.9 provides the complete bounded cartridge front end, DMG address
+Version 0.10 provides the complete bounded cartridge front end, DMG address
 bus, SM83 instruction core, shared hardware clock, dot-clocked PPU, and all
 four DMG audio channels. It validates both header and global checksums,
 creates an owned immutable ROM image, models cartridge RAM/RTC register
@@ -39,12 +39,14 @@ Battery cartridges persist exact raw SRAM as `HASH.SAV` and versioned MBC3
 clock state as `HASH.RTC` below
 `C:\R4OS\APPDATA\SUBSYSTEMS\r4os.gb\SAVE\`, where `HASH` is the uppercase
 SHA-256 digest of the complete ROM. A create-only per-ROM lease permits one
-writer, delayed dirty flushes use same-directory atomic replacement, and a
-clean close always attempts the final flush. Non-battery cartridges never
-touch persistence. Lost filesystem acknowledgements are retried only after an
-ownership-checked lease abort; a real competing writer remains a Busy error.
-Wall-clock recovery is bounded and cannot run the RTC backwards; save states
-are deliberately absent.
+writer. Delayed dirty flushes copy immutable SRAM and RTC snapshots into one
+serial application worker, which coalesces newer pending generations and
+performs same-directory atomic replacement without stalling guest time, video,
+or audio. Clean and failure teardown both drain and join that worker before
+releasing the lease. Non-battery cartridges never touch persistence. Lost
+filesystem acknowledgements are retried only after an ownership-checked lease
+abort; a real competing writer remains a Busy error. Wall-clock recovery is
+bounded and cannot run the RTC backwards; save states are deliberately absent.
 
 Build on Linux with `./Build.sh test` and on Windows with `Build.bat test`.
 `reference-test` additionally validates a local, optional reference tree; use
@@ -52,12 +54,25 @@ Build on Linux with `./Build.sh test` and on Windows with `Build.bat test`.
 `-Dgb-reference-suite=<id>` selects one manifest suite for diagnosis.
 `cartridge-test -Dgb-cartridge=<path>` validates one explicitly supplied local
 image and proves that probing leaves its bytes unchanged.
-The pinned DMG SameSuite APU selection and the QEMU WAV analyzer cover the
-DIV-APU/NR52 edge cases and the real R4OS audio path independently. Automated
-RTC3Test v004 and Mealybug MBC3-RTC execution cover tick, latch, halt, write,
-overflow, and subsecond behavior; host and guest persistence tests cover raw
-SRAM, corrupt input, exclusive ownership, delayed and atomic writes, and
-restart recovery.
+`Tests/dmg_test_matrix.json` is the machine-readable DMG-C qualification
+matrix. It records license, pinned revision, content hash, completion protocol,
+timeout, and target for 15 executed case sets from six open source families,
+plus ten explicit CGB, SGB, AGB, or external-peripheral exclusions. The
+reference gate executes all 500,000 SM83 vectors, 28 production-machine mapper
+ROMs, 34 applicable Mooneye clock/I/O ROMs, 32 Mooneye PPU ROMs, three
+DMG-applicable SameSuite ROMs, 25 pixel-exact Acid2/Mealybug cases, every
+RTC3Test v004 group, and the Mealybug MBC3-RTC ROM. Its pinned manifest totals
+15 suites, 852 files, and 500,129 result records, with expected digests checked
+for every suite. Commercial ROMs never participate in an automated gate.
+
+The repository-native original end-to-end fixture exercises joypad, timer,
+interrupt, PPU, all four APU channels, battery RAM, RTC, and finite completion
+through the production Machine. A deterministic maturity harness profiles CPU,
+PPU, and audio work, proves identical final digests at different host pacing,
+and keeps every guest slice bounded. Host and guest persistence tests cover raw
+SRAM, corrupt input, exclusive ownership, delayed and atomic writes, injected
+storage failures, coalesced asynchronous writes, drain-on-close, and restart
+recovery.
 The productive `R4SUBSYS1` path now opens each accepted cartridge as a private
 GUI instance. It runs one 32,768-T-cycle-bounded guest slice per common runtime
 cycle, publishes the native 160x144 Indexed8 surface through
@@ -75,9 +90,14 @@ display name, `.gb`/`.gbc` candidates, format ID, and bounded cartridge probe.
 `ASSOC.R4S` stores only `r4os.gb` plus `gameboy.dmg-cartridge`, so Explorer
 double-click and Open With both resolve the installed host and create a new
 R4X instance. The headless product gate performs that exact path for two
-simultaneous original test cartridges, injects physical keyboard events,
-requires frames and App-Audio, persists SRAM and RTC, closes each instance
-separately, and proves a CGB-only image is rejected in its own visible window.
+simultaneous original test cartridges for at least 60 guest seconds on both
+one- and four-vCPU QEMU. It injects physical keyboard events, exercises focus
+and lifecycle actions, requires bounded slices and scheduling gaps, advancing
+PPU frames and lossless APU production, persists SRAM and RTC through the
+drained worker, closes each instance separately, and proves a CGB-only image is
+rejected in its own visible window. Independent 60-second one- and four-vCPU
+QEMU WAV captures verify continuous real App-Audio output and the fixture's
+approximately 440-Hz, 2:1 stereo signature across its intentional reset.
 The deterministic test cartridges are generated entirely from original source
 in this repository and contain no proprietary boot ROM, game data, or brand
 assets.

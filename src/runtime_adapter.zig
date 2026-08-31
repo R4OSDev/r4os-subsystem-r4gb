@@ -8,6 +8,11 @@ pub const reset_not_available: i32 = -9701;
 pub const illegal_cpu_state: i32 = -9702;
 pub const idle_interval_ns: u64 = std.time.ns_per_ms;
 
+pub const CompletionWitness = struct {
+    address: u16,
+    value: u8,
+};
+
 /// Maps one private DMG machine to the common cooperative runtime. Guest
 /// time grants bounded T-cycle slices; PCM leaves the emulator only through
 /// GuestDriver.renderAudio and therefore through App-Audio/AUDSVC.
@@ -20,7 +25,10 @@ pub const Adapter = struct {
     audio_prefill_released: bool = false,
     audio_render_calls: u64 = 0,
     audio_feedback_calls: u64 = 0,
+    last_step_guest_ns: u64 = 0,
+    maximum_step_gap_ns: u64 = 0,
     stop_guest_ns: u64 = 0,
+    completion_witness: ?CompletionWitness = null,
     source_finished: bool = false,
     transport_pending_bytes: u64 = 0,
 
@@ -39,6 +47,11 @@ pub const Adapter = struct {
         return result;
     }
 
+    pub fn setCompletionWitness(self: *Adapter, witness: CompletionWitness) !void {
+        if (witness.address < 0xC000 or witness.address > 0xDFFF) return error.InvalidCompletionWitnessAddress;
+        self.completion_witness = witness;
+    }
+
     pub fn driver(self: *Adapter) runtime.GuestDriver {
         return .{
             .context = self,
@@ -52,12 +65,23 @@ pub const Adapter = struct {
 
 fn step(context: *anyopaque, budget: u32, guest_now_ns: u64) runtime.StepResult {
     const self: *Adapter = @ptrCast(@alignCast(context));
-    const effective_guest_ns = if (self.stop_guest_ns == 0) guest_now_ns else @min(guest_now_ns, self.stop_guest_ns);
-    const executed = self.machine.runHostSliceBounded(effective_guest_ns, budget);
-    if (self.machine.cpu.locked) return runtime.StepResult.fail(illegal_cpu_state).withOperations(executed);
+    if (self.last_step_guest_ns != 0) {
+        self.maximum_step_gap_ns = @max(self.maximum_step_gap_ns, guest_now_ns -| self.last_step_guest_ns);
+    }
+    self.last_step_guest_ns = guest_now_ns;
+    var executed: u32 = 0;
+    if (!self.source_finished) {
+        const effective_guest_ns = if (self.stop_guest_ns == 0) guest_now_ns else @min(guest_now_ns, self.stop_guest_ns);
+        executed = self.machine.runHostSliceBounded(effective_guest_ns, budget);
+        if (self.machine.cpu.locked) return runtime.StepResult.fail(illegal_cpu_state).withOperations(executed);
 
-    if (self.stop_guest_ns != 0 and effective_guest_ns == self.stop_guest_ns and self.machine.guest_clock.pending_t_cycles == 0) {
-        self.source_finished = true;
+        if (self.stop_guest_ns != 0 and effective_guest_ns == self.stop_guest_ns and self.machine.guest_clock.pending_t_cycles == 0) {
+            self.source_finished = true;
+        }
+        if (self.completion_witness) |witness| {
+            const offset: usize = @as(usize, witness.address) - 0xC000;
+            if (self.machine.bus.work_ram[offset] == witness.value) self.source_finished = true;
+        }
     }
 
     const frame_ready = self.machine.ppu.frame_revision != self.observed_frame_revision;

@@ -88,6 +88,15 @@ pub fn build(b: *std.Build) void {
         run_references.addArg(case_path);
     }
 
+    const maturity_root = b.createModule(.{
+        .root_source_file = b.path("Tests/maturity_harness.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+    });
+    maturity_root.addImport("core", core);
+    const maturity_harness = b.addExecutable(.{ .name = "r4gb-maturity-harness", .root_module = maturity_root });
+    const run_maturity = b.addRunArtifact(maturity_harness);
+
     const cartridge_probe_root = b.createModule(.{
         .root_source_file = b.path("Tests/cartridge_probe.zig"),
         .target = b.graph.host,
@@ -106,9 +115,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_runtime_adapter_tests.step);
     test_step.dependOn(&run_persistence_tests.step);
     test_step.dependOn(&run_product_host_tests.step);
+    test_step.dependOn(&run_maturity.step);
 
     const reference_step = b.step("reference-test", "Validate all available pinned SM83 vectors and open ROM fixtures");
     reference_step.dependOn(&run_references.step);
+
+    const maturity_step = b.step("maturity-test", "Profile CPU, PPU and APU and prove host-speed-independent output");
+    maturity_step.dependOn(&run_maturity.step);
 
     const cartridge_step = b.step("cartridge-test", "Validate one explicitly supplied local cartridge without modifying it");
     cartridge_step.dependOn(&run_cartridge_probe.step);

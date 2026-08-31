@@ -15,6 +15,7 @@ const Suite = struct {
     kind: SuiteKind,
     expected_files: usize,
     expected_records: usize = 0,
+    expected_digest: []const u8,
     categories: []const []const u8,
     selection: ?[]const u8 = null,
 };
@@ -22,6 +23,71 @@ const Suite = struct {
 const Manifest = struct {
     schema: u32,
     suites: []const Suite,
+};
+
+const MatrixTarget = struct {
+    hardware: []const u8,
+    cpu_revision: []const u8,
+    startup: []const u8,
+    display: []const u8,
+    out_of_scope: []const []const u8,
+};
+
+const MatrixHash = struct {
+    algorithm: []const u8,
+    scope: []const u8,
+    value: []const u8,
+};
+
+const MatrixSource = struct {
+    id: []const u8,
+    upstream: []const u8,
+    revision: []const u8,
+    license: []const u8,
+    catalog_files: usize,
+    catalog_cases: usize,
+    required_cases: usize,
+    hashes: []const MatrixHash,
+};
+
+const MatrixProtocol = struct {
+    id: []const u8,
+    success: []const u8,
+    timeout: []const u8,
+};
+
+const MatrixCaseSet = struct {
+    suite_id: []const u8,
+    source_ids: []const []const u8,
+    protocol_id: []const u8,
+    selector: []const u8,
+    revision: []const u8,
+    target_component: []const u8,
+    timeout: []const u8,
+    disposition: []const u8,
+    expected_files: usize,
+    expected_records: usize,
+    expected_digest: []const u8,
+};
+
+const MatrixExclusion = struct {
+    source_id: []const u8,
+    classification: []const u8,
+    cases: usize,
+    revision: []const u8,
+    disposition: []const u8,
+    reason: []const u8,
+};
+
+const DmgTestMatrix = struct {
+    schema: u32,
+    target: MatrixTarget,
+    aggregate_digest: []const u8,
+    policy: []const u8,
+    sources: []const MatrixSource,
+    protocols: []const MatrixProtocol,
+    case_sets: []const MatrixCaseSet,
+    exclusions: []const MatrixExclusion,
 };
 
 const Summary = struct {
@@ -45,16 +111,26 @@ fn run(init: std.process.Init) !void {
     const root = if (args.len >= 2) args[1] else "../../../ExFiles/Reference/GameBoy";
     const suite_filter: ?[]const u8 = if (args.len >= 3 and args[2].len != 0) args[2] else null;
     const case_filter: ?[]const u8 = if (args.len >= 4) args[3] else null;
-    cwd.access(io, root, .{}) catch {
-        std.debug.print("R4GB reference harness SKIP: optional root missing: {s}\n", .{root});
-        return;
-    };
-
     const manifest_bytes = try cwd.readFileAlloc(io, "Tests/reference_manifest.json", allocator, .limited(max_manifest_bytes));
     defer allocator.free(manifest_bytes);
     var parsed = try std.json.parseFromSlice(Manifest, allocator, manifest_bytes, .{});
     defer parsed.deinit();
     if (parsed.value.schema != 1) return error.UnsupportedManifestSchema;
+
+    const matrix_bytes = try cwd.readFileAlloc(io, "Tests/dmg_test_matrix.json", allocator, .limited(max_manifest_bytes));
+    defer allocator.free(matrix_bytes);
+    var parsed_matrix = try std.json.parseFromSlice(DmgTestMatrix, allocator, matrix_bytes, .{});
+    defer parsed_matrix.deinit();
+    try validateMatrix(parsed.value, parsed_matrix.value);
+    std.debug.print(
+        "R4GB DMG matrix OK: sources={d} case-sets={d} exclusions={d} target={s}\n",
+        .{ parsed_matrix.value.sources.len, parsed_matrix.value.case_sets.len, parsed_matrix.value.exclusions.len, parsed_matrix.value.target.cpu_revision },
+    );
+
+    cwd.access(io, root, .{}) catch {
+        std.debug.print("R4GB reference harness SKIP: optional root missing: {s}\n", .{root});
+        return;
+    };
 
     var total_files: usize = 0;
     var total_records: usize = 0;
@@ -94,12 +170,123 @@ fn run(init: std.process.Init) !void {
         total_records += summary.records;
         var digest_hex: [64]u8 = undefined;
         _ = std.fmt.bufPrint(digest_hex[0..], "{x}", .{summary.digest}) catch unreachable;
+        if (case_filter == null and !std.mem.eql(u8, suite.expected_digest, digest_hex[0..])) {
+            std.debug.print(
+                "R4GB reference digest mismatch: {s} actual={s} expected={s}\n",
+                .{ suite.id, digest_hex[0..], suite.expected_digest },
+            );
+            return error.ReferenceDigestMismatch;
+        }
         std.debug.print("R4GB reference suite OK: {s} files={d} records={d} categories=", .{ suite.id, summary.files, summary.records });
         for (suite.categories, 0..) |category, index| std.debug.print("{s}{s}", .{ if (index == 0) "" else ",", category });
         std.debug.print(" digest={s}\n", .{digest_hex[0..]});
     }
     if (suite_filter != null and present_suites == 0) return error.ReferenceSuiteNotFound;
     std.debug.print("R4GB reference harness OK: suites={d} files={d} vectors={d}\n", .{ present_suites, total_files, total_records });
+}
+
+fn validateMatrix(manifest: Manifest, matrix: DmgTestMatrix) !void {
+    if (matrix.schema != 1) return error.UnsupportedDmgMatrixSchema;
+    if (!std.mem.eql(u8, matrix.target.cpu_revision, "DMG-CPU-C")) return error.UnsupportedDmgMatrixRevision;
+    if (matrix.target.hardware.len == 0 or matrix.target.startup.len == 0 or matrix.target.display.len == 0 or
+        matrix.target.out_of_scope.len == 0 or matrix.aggregate_digest.len == 0 or matrix.policy.len == 0)
+    {
+        return error.IncompleteDmgMatrixTarget;
+    }
+    if (matrix.sources.len == 0 or matrix.protocols.len == 0 or matrix.case_sets.len != manifest.suites.len) {
+        return error.IncompleteDmgMatrix;
+    }
+
+    for (matrix.sources, 0..) |source, source_index| {
+        if (source.id.len == 0 or source.upstream.len == 0 or source.revision.len == 0 or source.license.len == 0 or
+            source.catalog_files == 0 or source.catalog_cases == 0 or source.required_cases == 0 or source.hashes.len == 0)
+        {
+            return error.IncompleteDmgMatrixSource;
+        }
+        for (matrix.sources[0..source_index]) |prior| {
+            if (std.mem.eql(u8, source.id, prior.id)) return error.DuplicateDmgMatrixSource;
+        }
+        for (source.hashes) |hash| {
+            if (hash.algorithm.len == 0 or hash.scope.len == 0 or !isLowerHexDigest(hash.value)) {
+                return error.InvalidDmgMatrixHash;
+            }
+            const expected_length: usize = if (std.mem.eql(u8, hash.algorithm, "git-sha1")) 40 else 64;
+            if (hash.value.len != expected_length) return error.InvalidDmgMatrixHash;
+        }
+
+        var excluded_cases: usize = 0;
+        for (matrix.exclusions) |exclusion| {
+            if (!std.mem.eql(u8, exclusion.source_id, source.id)) continue;
+            excluded_cases += exclusion.cases;
+        }
+        if (source.required_cases + excluded_cases != source.catalog_cases) return error.DmgMatrixCoverageGap;
+    }
+
+    for (matrix.protocols, 0..) |protocol, protocol_index| {
+        if (protocol.id.len == 0 or protocol.success.len == 0 or protocol.timeout.len == 0) return error.IncompleteDmgMatrixProtocol;
+        for (matrix.protocols[0..protocol_index]) |prior| {
+            if (std.mem.eql(u8, protocol.id, prior.id)) return error.DuplicateDmgMatrixProtocol;
+        }
+    }
+
+    for (matrix.exclusions) |exclusion| {
+        if (exclusion.cases == 0 or exclusion.classification.len == 0 or exclusion.revision.len == 0 or
+            exclusion.disposition.len == 0 or exclusion.reason.len == 0 or !matrixHasSource(matrix, exclusion.source_id))
+        {
+            return error.InvalidDmgMatrixExclusion;
+        }
+    }
+
+    for (manifest.suites) |suite| {
+        if (!isLowerHexDigest(suite.expected_digest) or suite.expected_digest.len != 64) return error.InvalidReferenceDigest;
+        var match_count: usize = 0;
+        for (matrix.case_sets) |case_set| {
+            if (!std.mem.eql(u8, case_set.suite_id, suite.id)) continue;
+            match_count += 1;
+            if (case_set.expected_files != suite.expected_files or case_set.expected_records != suite.expected_records or
+                !std.mem.eql(u8, case_set.expected_digest, suite.expected_digest))
+            {
+                return error.DmgMatrixManifestMismatch;
+            }
+            if (case_set.source_ids.len == 0 or !matrixHasProtocol(matrix, case_set.protocol_id) or case_set.selector.len == 0 or
+                case_set.revision.len == 0 or case_set.target_component.len == 0 or case_set.timeout.len == 0 or case_set.disposition.len == 0)
+            {
+                return error.IncompleteDmgMatrixCaseSet;
+            }
+            for (case_set.source_ids) |source_id| {
+                if (!matrixHasSource(matrix, source_id)) return error.UnknownDmgMatrixSource;
+            }
+        }
+        if (match_count != 1) return error.DmgMatrixSuiteMappingMismatch;
+    }
+
+    for (matrix.case_sets, 0..) |case_set, case_index| {
+        for (matrix.case_sets[0..case_index]) |prior| {
+            if (std.mem.eql(u8, case_set.suite_id, prior.suite_id)) return error.DuplicateDmgMatrixCaseSet;
+        }
+    }
+}
+
+fn matrixHasSource(matrix: DmgTestMatrix, id: []const u8) bool {
+    for (matrix.sources) |source| {
+        if (std.mem.eql(u8, source.id, id)) return true;
+    }
+    return false;
+}
+
+fn matrixHasProtocol(matrix: DmgTestMatrix, id: []const u8) bool {
+    for (matrix.protocols) |protocol| {
+        if (std.mem.eql(u8, protocol.id, id)) return true;
+    }
+    return false;
+}
+
+fn isLowerHexDigest(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |character| {
+        if (!((character >= '0' and character <= '9') or (character >= 'a' and character <= 'f'))) return false;
+    }
+    return true;
 }
 
 fn scanVectorTree(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, root: []const u8) !Summary {

@@ -35,6 +35,7 @@ pub const Backend = struct {
     release_fn: *const fn (*anyopaque, *const [digest_bytes]u8, u64) BackendError!void,
     read_exact_fn: *const fn (*anyopaque, *const [digest_bytes]u8, FileKind, []u8) ReadResult,
     write_atomic_fn: *const fn (*anyopaque, *const [digest_bytes]u8, FileKind, []const u8) BackendError!void,
+    poll_fn: ?*const fn (*anyopaque) BackendError!void = null,
 
     pub fn acquire(self: Backend, digest: *const [digest_bytes]u8, generation: u64) BackendError!void {
         return self.acquire_fn(self.context, digest, generation);
@@ -50,6 +51,12 @@ pub const Backend = struct {
 
     pub fn writeAtomic(self: Backend, digest: *const [digest_bytes]u8, kind: FileKind, bytes: []const u8) BackendError!void {
         return self.write_atomic_fn(self.context, digest, kind, bytes);
+    }
+
+    /// Gives asynchronous product backends a non-blocking completion point.
+    /// Deterministic in-memory backends remain synchronous and omit it.
+    pub fn poll(self: Backend) BackendError!void {
+        if (self.poll_fn) |callback| try callback(self.context);
     }
 };
 
@@ -143,7 +150,9 @@ pub const Session = struct {
         monotonic_now_ns: u64,
     ) FlushError!bool {
         if (self.closed) return error.Closed;
-        if (!self.enabled or (!cart.ram_dirty and !cart.rtc_dirty)) return false;
+        if (!self.enabled) return false;
+        try self.backend.poll();
+        if (!cart.ram_dirty and !cart.rtc_dirty) return false;
         if (guest_tick -| self.last_flush_guest_tick < flush_delay_t_cycles) return false;
         try self.flush(cart, wall_now_seconds, monotonic_now_ns);
         self.last_flush_guest_tick = guest_tick;
@@ -158,6 +167,7 @@ pub const Session = struct {
     ) FlushError!void {
         if (self.closed) return error.Closed;
         if (!self.enabled) return;
+        try self.backend.poll();
         if (cart.ram_dirty and cart.external_ram.len != 0) {
             try self.backend.writeAtomic(&self.digest, .sram, cart.external_ram);
             cart.ram_dirty = false;
