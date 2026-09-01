@@ -37,16 +37,26 @@ without stopping CPU, timer, or PPU progress.
 
 Battery cartridges persist exact raw SRAM as `HASH.SAV` and versioned MBC3
 clock state as `HASH.RTC` below
-`C:\R4OS\APPDATA\SUBSYSTEMS\r4os.gb\SAVE\`, where `HASH` is the uppercase
+`C:\R4OS\SUBSYSTEMS\r4os.gb\SAVE\`, where `HASH` is the uppercase
 SHA-256 digest of the complete ROM. A create-only per-ROM lease permits one
 writer. Delayed dirty flushes copy immutable SRAM and RTC snapshots into one
 serial application worker, which coalesces newer pending generations and
 performs same-directory atomic replacement without stalling guest time, video,
 or audio. Clean and failure teardown both drain and join that worker before
 releasing the lease. Non-battery cartridges never touch persistence. Lost
-filesystem acknowledgements are retried only after an ownership-checked lease
-abort; a real competing writer remains a Busy error. Wall-clock recovery is
-bounded and cannot run the RTC backwards; save states are deliberately absent.
+filesystem acknowledgements are retried within a bounded transaction. If a
+process ends between the NTFS visibility points, the retained stage and
+last-good backup are replayed under the cartridge lease on the next open, but
+only after the stage has the exact expected size. RTC stages additionally need
+a valid version, register set, and checksum. A partial or malformed stage
+fails closed and preserves the backup; a backup is never removed unless the
+canonical target is independently resolvable with the expected size and, for
+RTC, valid content. A real competing writer remains a Busy error. Wall-clock
+recovery is bounded and cannot run the RTC backwards; save states are
+deliberately absent.
+The former APPDATA path is never probed at runtime. Installations that used the
+short-lived pre-release path must copy validated SAV/RTC files to the canonical
+root before starting the corresponding cartridge.
 
 Build on Linux with `./Build.sh test` and on Windows with `Build.bat test`.
 `reference-test` additionally validates a local, optional reference tree; use

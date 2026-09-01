@@ -9,7 +9,8 @@
 - Color Game Boy: dual-mode cartridges may execute through their DMG path;
   CGB-only cartridges are rejected. CGB hardware features are out of scope.
 - Boot: no proprietary Nintendo boot ROM is distributed or required.
-- Persistence root: `C:\R4OS\APPDATA\SUBSYSTEMS\r4os.gb\SAVE\`.
+- Persistence root: `C:\R4OS\SUBSYSTEMS\r4os.gb\SAVE\`. The former
+  pre-release APPDATA path is not accessed at runtime.
 - Save states are intentionally out of scope. Battery SRAM and MBC3 RTC
   persistence are product requirements.
 - Link emulation is not part of 0.72.X. The serial hardware remains a distinct
@@ -73,6 +74,12 @@ ROM data is copied into instance-owned immutable storage before use.
 - Dirty data is delayed and atomically replaced in the same directory. Clean
   Close performs a mandatory final flush; a failed replacement leaves the
   previously published save intact.
+- A retained transaction stage is replayed under the cartridge lease on the
+  next open only when it has the exact expected size; RTC stages must also pass
+  version, register, and checksum validation. The last-good backup is removed
+  only after the canonical SAV/RTC target is independently resolvable with the
+  expected size and valid RTC content. Partial or malformed stages and
+  orphaned backups fail closed and are preserved for recovery.
 - Missing files initialize clean state. Wrong SRAM sizes and malformed RTC
   records are explicit errors. Backward wall-clock movement adds no time and
   implausible forward movement is capped at 512 days.

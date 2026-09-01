@@ -1,7 +1,7 @@
 const std = @import("std");
 const cartridge = @import("cartridge.zig");
 
-pub const save_root = "C:\\R4OS\\APPDATA\\SUBSYSTEMS\\r4os.gb\\SAVE\\";
+pub const save_root = "C:\\R4OS\\SUBSYSTEMS\\r4os.gb\\SAVE\\";
 pub const digest_bytes = cartridge.rom_digest_bytes;
 pub const digest_hex_bytes = digest_bytes * 2;
 pub const flush_delay_t_cycles: u64 = 2 * cartridge.dmg_t_cycles_per_second;

@@ -61,6 +61,15 @@ pub fn build(b: *std.Build) void {
     const persistence_tests = b.addTest(.{ .root_module = persistence_root });
     const run_persistence_tests = b.addRunArtifact(persistence_tests);
 
+    const persistence_r4os_root = b.createModule(.{
+        .root_source_file = b.path("src/persistence_r4os.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    persistence_r4os_root.addImport("r4os", host_r4os);
+    const persistence_r4os_tests = b.addTest(.{ .root_module = persistence_r4os_root });
+    const run_persistence_r4os_tests = b.addRunArtifact(persistence_r4os_tests);
+
     const product_host_root = b.createModule(.{
         .root_source_file = b.path("Tests/product_host_test.zig"),
         .target = b.graph.host,
@@ -106,6 +115,9 @@ pub fn build(b: *std.Build) void {
     const cartridge_probe = b.addExecutable(.{ .name = "r4gb-cartridge-probe", .root_module = cartridge_probe_root });
     const run_cartridge_probe = b.addRunArtifact(cartridge_probe);
     run_cartridge_probe.addArg(b.option([]const u8, "gb-cartridge", "Explicit local cartridge image to validate") orelse "");
+    if (b.option([]const u8, "gb-cartridge-run-seconds", "Optionally execute the supplied cartridge for bounded guest seconds")) |seconds| {
+        run_cartridge_probe.addArg(seconds);
+    }
 
     const test_step = b.step("test", "Build R4GB and run deterministic owner tests");
     test_step.dependOn(b.getInstallStep());
@@ -114,6 +126,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_video_host_tests.step);
     test_step.dependOn(&run_runtime_adapter_tests.step);
     test_step.dependOn(&run_persistence_tests.step);
+    test_step.dependOn(&run_persistence_r4os_tests.step);
     test_step.dependOn(&run_product_host_tests.step);
     test_step.dependOn(&run_maturity.step);
 

@@ -355,8 +355,23 @@ fn runProduct(app: *r4os.App) i32 {
         if (!e2e_ok) return error_e2e_trace;
     }
     if (close_result != 0) {
-        sys.println("R4GB: clean persistence close failed.");
-        return error_save_close;
+        const storage_stage = save_store.failureStageName();
+        const storage_code = save_store.failureCode();
+        sys.write("R4GB: persistence failure stage=");
+        sys.write(storage_stage);
+        sys.write(" code=");
+        sys.printI32(storage_code);
+        sys.println("");
+        var storage_text: [128]u8 = undefined;
+        const rendered = std.fmt.bufPrint(storage_text[0..], "Speicherstufe: {s}, Dateisystemcode: {d}", .{
+            storage_stage,
+            storage_code,
+        }) catch "Cartridge-Speicher konnte nicht sicher abgeschlossen werden.";
+        return showStatus(allocator, sys, desk, draw, "R4GB - Speicherfehler", &.{
+            "SAV/RTC konnte nicht sicher veroeffentlicht werden.",
+            rendered,
+            "Der letzte gueltige Stand bleibt erhalten; ein vollstaendiger Stage wird beim naechsten Start wiederaufgenommen.",
+        }, error_save_close);
     }
     if (runtime_state == .closed or runtime_state == .completed) return 0;
 
@@ -1057,6 +1072,26 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     if (first_store.stats.started == 0 or first_store.stats.started != first_store.stats.completed or first_store.stats.errors != 0)
         return error.AsyncPersistenceMismatch;
 
+    var recovery_registers = first_cart.mapper.rtc;
+    recovery_registers.seconds = 17;
+    recovery_registers.minutes = 34;
+    recovery_registers.hours = 12;
+    recovery_registers.day_low = 0xA5;
+    recovery_registers.day_high = 0x41; // day bit 8 + halt
+    var recovery_record: [core.persistence.rtc_record_bytes]u8 = undefined;
+    core.persistence.encodeRtc(.{
+        .registers = recovery_registers,
+        .wall_anchor_seconds = wall orelse 0,
+        .monotonic_anchor_ns = monotonic,
+        .generation = generation + 2,
+    }, &recovery_record);
+    try competing_store.prepareInterruptedPublishForTest(&first_cart.rom_digest, .rtc, recovery_record[0..]);
+    const interrupted_state = try competing_store.recoveryTestStateForTest(&first_cart.rom_digest, .rtc);
+    if (interrupted_state.target_size != null or
+        interrupted_state.stage_size == null or interrupted_state.stage_size.? != core.persistence.rtc_record_bytes or
+        interrupted_state.backup_size == null or interrupted_state.backup_size.? != core.persistence.rtc_record_bytes)
+        return error.InterruptedRecoveryFixtureMismatch;
+
     var reopened_cart = try core.cartridge.Cartridge.init(allocator, bytes);
     defer reopened_cart.deinit();
     var reopened_session = try core.persistence.Session.open(&reopened_cart, competing_store.backend(), generation + 2, wall, monotonic);
@@ -1066,8 +1101,12 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     for (reopened_cart.external_ram, 0..) |value, index| {
         if (value != @as(u8, @truncate(index *% 37 +% 11))) return error.SramMismatch;
     }
+    const recovered_state = try competing_store.recoveryTestStateForTest(&first_cart.rom_digest, .rtc);
+    if (recovered_state.target_size == null or recovered_state.target_size.? != core.persistence.rtc_record_bytes or
+        recovered_state.stage_size != null or recovered_state.backup_size != null)
+        return error.InterruptedRecoveryMismatch;
     const rtc = reopened_cart.mapper.rtc;
-    if (rtc.seconds != 58 or rtc.minutes != 59 or rtc.hours != 23 or rtc.day_low != 0xFE or rtc.day_high != 0x41)
+    if (rtc.seconds != 17 or rtc.minutes != 34 or rtc.hours != 12 or rtc.day_low != 0xA5 or rtc.day_high != 0x41)
         return error.RtcMismatch;
     reopened_cart.writeControl(0x0000, 0x0A);
     reopened_cart.writeControl(0x4000, 0);
@@ -1084,6 +1123,38 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     if (final_cart.external_ram[0] != 0xA7 or final_cart.external_ram[1] != @as(u8, @truncate(1 * 37 + 11)))
         return error.AtomicReplacementMismatch;
     try final_session.close(&final_cart, generation + 3, wall, monotonic);
+
+    var partial_store = persistence_r4os.Store.init(files);
+    try partial_store.prepareInterruptedPublishForTest(
+        &first_cart.rom_digest,
+        .rtc,
+        recovery_record[0 .. recovery_record.len / 2],
+    );
+    const partial_fixture = try partial_store.recoveryTestStateForTest(&first_cart.rom_digest, .rtc);
+    if (partial_fixture.target_size != null or
+        partial_fixture.stage_size == null or partial_fixture.stage_size.? != recovery_record.len / 2 or
+        partial_fixture.backup_size == null or partial_fixture.backup_size.? != core.persistence.rtc_record_bytes)
+        return error.PartialRecoveryFixtureMismatch;
+
+    var rejected_cart = try core.cartridge.Cartridge.init(allocator, bytes);
+    defer rejected_cart.deinit();
+    var rejected_store = persistence_r4os.Store.init(files);
+    const rejected = core.persistence.Session.open(&rejected_cart, rejected_store.backend(), generation + 4, wall, monotonic);
+    if (rejected) |opened| {
+        var unexpected = opened;
+        unexpected.close(&rejected_cart, generation + 4, wall, monotonic) catch {};
+        return error.PartialRecoveryAccepted;
+    } else |fault| {
+        if (fault != error.Io) return fault;
+    }
+    if (!std.mem.eql(u8, rejected_store.failureStageName(), "atomic_recover") or
+        rejected_store.failureCode() != r4os.abi.file_stream_error_size_mismatch)
+        return error.PartialRecoveryFailureMismatch;
+    const partial_preserved = try rejected_store.recoveryTestStateForTest(&first_cart.rom_digest, .rtc);
+    if (partial_preserved.target_size != null or
+        partial_preserved.stage_size == null or partial_preserved.stage_size.? != recovery_record.len / 2 or
+        partial_preserved.backup_size == null or partial_preserved.backup_size.? != core.persistence.rtc_record_bytes)
+        return error.PartialRecoveryWasNotPreserved;
 }
 
 fn apuSelfTest(app: *r4os.App) i32 {

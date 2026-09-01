@@ -19,12 +19,28 @@ pub const FailureStage = enum {
     lock_abort,
     atomic_cleanup,
     atomic_begin,
+    atomic_begin_create,
+    atomic_begin_write,
+    atomic_begin_finish,
+    atomic_begin_abort,
+    atomic_release,
+    atomic_recover,
     atomic_stage,
+    atomic_stage_begin,
+    atomic_stage_write,
+    atomic_stage_finish,
+    atomic_stage_verify,
     atomic_publish,
     sram_info,
     sram_read,
     rtc_info,
     rtc_read,
+};
+
+pub const RecoveryTestState = struct {
+    target_size: ?u64,
+    stage_size: ?u64,
+    backup_size: ?u64,
 };
 
 pub const Store = struct {
@@ -58,8 +74,8 @@ pub const Store = struct {
     }
 
     pub fn removeTestFiles(self: *Store, digest: *const [persistence.digest_bytes]u8) void {
-        // The self-test may start from an image where APPDATA does not exist
-        // yet. Avoid issuing delete operations through a missing parent chain;
+        // The self-test may start from an image where the save root does not
+        // exist yet. Avoid delete operations through a missing parent chain;
         // production Session.open creates the same hierarchy before acquiring
         // its lease.
         ensureSaveRoot(&self.files) catch return;
@@ -76,6 +92,126 @@ pub const Store = struct {
             const path = makePath(digest, role) catch continue;
             _ = self.files.delete(path.asZ());
         }
+    }
+
+    /// Diagnostic-only fixture for the in-image persistence gate. The caller
+    /// must use a synthetic cartridge digest: this deliberately leaves the
+    /// exact namespace tuple produced by an interrupted first publish leg.
+    pub fn prepareInterruptedPublishForTest(
+        self: *Store,
+        digest: *const [persistence.digest_bytes]u8,
+        kind: persistence.FileKind,
+        bytes: []const u8,
+    ) persistence.BackendError!void {
+        if (self.lock_writer != null) return error.Busy;
+        try ensureSaveRoot(&self.files);
+        const transaction = makePath(digest, .atomic_lock) catch return error.Io;
+        const target = makePath(digest, if (kind == .sram) .sram else .rtc) catch return error.Io;
+        const stage = makePath(digest, if (kind == .sram) .sram_stage else .rtc_stage) catch return error.Io;
+        const backup = makePath(digest, if (kind == .sram) .sram_backup else .rtc_backup) catch return error.Io;
+        try removeAtomicScratch(self, &transaction);
+        try removeAtomicScratch(self, &stage);
+        try removeAtomicScratch(self, &backup);
+
+        const previous_size = (try pathSizeVisibleWithRetry(self, &target, .atomic_stage)) orelse {
+            self.recordFailure(.atomic_stage, r4os.r4sys.file_replace_atomic_error_not_found);
+            return error.Io;
+        };
+        var writer = switch (self.files.streamWriter(stage.asZ(), r4os.abi.file_stream_open_replace)) {
+            .writer => |value| value,
+            .failure => |fault| {
+                self.recordFailure(.atomic_stage, fault);
+                return mapOpenFault(fault);
+            },
+        };
+        var finished = false;
+        defer if (!finished) {
+            _ = writer.abort();
+        };
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const end = @min(offset + 16 * 1024, bytes.len);
+            switch (writer.write(bytes[offset..end])) {
+                .ok => {},
+                .failure => |fault| {
+                    self.recordFailure(.atomic_stage, fault);
+                    return mapOpenFault(fault);
+                },
+                .missing => {
+                    self.recordFailure(.atomic_stage, 0);
+                    return error.Io;
+                },
+            }
+            offset = end;
+        }
+        switch (writer.finish()) {
+            .ok => finished = true,
+            .failure => |fault| {
+                self.recordFailure(.atomic_stage, fault);
+                return mapOpenFault(fault);
+            },
+            .missing => {
+                self.recordFailure(.atomic_stage, 0);
+                return error.Io;
+            },
+        }
+        const staged_size = (try pathSizeVisibleWithRetry(self, &stage, .atomic_stage)) orelse {
+            self.recordFailure(.atomic_stage, r4os.r4sys.file_replace_atomic_error_not_found);
+            return error.Io;
+        };
+        if (staged_size != bytes.len) {
+            self.recordFailure(.atomic_stage, r4os.abi.file_stream_error_size_mismatch);
+            return error.Io;
+        }
+
+        for (0..create_retry_attempts) |attempt| {
+            switch (self.files.rename(target.asZ(), backup.asZ())) {
+                .ok => break,
+                .missing => {
+                    const visible_backup = try pathSizeVisibleWithRetry(self, &backup, .atomic_stage);
+                    if (visible_backup != null and visible_backup.? == previous_size) break;
+                    self.recordFailure(.atomic_stage, r4os.r4sys.file_replace_atomic_error_not_found);
+                    return error.Io;
+                },
+                .failure => |fault| {
+                    if (attempt + 1 == create_retry_attempts) {
+                        self.recordFailure(.atomic_stage, fault);
+                        return mapOpenFault(fault);
+                    }
+                    waitForCreateRetry(&self.files);
+                    continue;
+                },
+            }
+        }
+        const backup_size = (try pathSizeVisibleWithRetry(self, &backup, .atomic_stage)) orelse {
+            self.recordFailure(.atomic_stage, r4os.r4sys.file_replace_atomic_error_not_found);
+            return error.Io;
+        };
+        if (backup_size != previous_size) {
+            self.recordFailure(.atomic_stage, r4os.abi.file_stream_error_size_mismatch);
+            return error.Io;
+        }
+        if (try pathSizeWithRetry(self, &target, .atomic_stage) != null) {
+            self.recordFailure(.atomic_stage, r4os.r4sys.file_replace_atomic_error_conflict);
+            return error.Io;
+        }
+        self.failure_stage = .none;
+        self.failure_code = 0;
+    }
+
+    pub fn recoveryTestStateForTest(
+        self: *Store,
+        digest: *const [persistence.digest_bytes]u8,
+        kind: persistence.FileKind,
+    ) persistence.BackendError!RecoveryTestState {
+        const target = makePath(digest, if (kind == .sram) .sram else .rtc) catch return error.Io;
+        const stage = makePath(digest, if (kind == .sram) .sram_stage else .rtc_stage) catch return error.Io;
+        const backup = makePath(digest, if (kind == .sram) .sram_backup else .rtc_backup) catch return error.Io;
+        return .{
+            .target_size = try pathSizeWithRetry(self, &target, .atomic_recover),
+            .stage_size = try pathSizeWithRetry(self, &stage, .atomic_recover),
+            .backup_size = try pathSizeWithRetry(self, &backup, .atomic_recover),
+        };
     }
 
     fn acquire(context: *anyopaque, digest: *const [persistence.digest_bytes]u8, generation: u64) persistence.BackendError!void {
@@ -121,6 +257,11 @@ pub const Store = struct {
         out: []u8,
     ) persistence.ReadResult {
         const self: *Store = @ptrCast(@alignCast(context));
+        if (self.lock_writer == null or !std.mem.eql(u8, self.lock_digest[0..], digest[0..])) {
+            self.recordFailure(.atomic_recover, r4os.r4sys.file_replace_atomic_error_conflict);
+            return .io;
+        }
+        recoverPendingKind(self, digest, kind, out.len) catch return .io;
         const path = makePath(digest, if (kind == .sram) .sram else .rtc) catch return .io;
         const info = info_retry: {
             for (0..create_retry_attempts) |attempt| {
@@ -167,86 +308,30 @@ pub const Store = struct {
         const target = makePath(digest, if (kind == .sram) .sram else .rtc) catch return error.Io;
         const stage = makePath(digest, if (kind == .sram) .sram_stage else .rtc_stage) catch return error.Io;
         const backup = makePath(digest, if (kind == .sram) .sram_backup else .rtc_backup) catch return error.Io;
-        // The fixed 8.3 scratch names are reused by every periodic flush.
-        // Once the cartridge lease is held, leftovers from a completed or
-        // interrupted prior replace belong exclusively to this digest and
-        // must be retired before opening the next transaction.
-        try removeAtomicScratch(self, &transaction);
-        try removeAtomicScratch(self, &stage);
+        try beginAtomicTransaction(self, &transaction);
+        var transaction_held = true;
+        defer if (transaction_held) {
+            _ = abortOwnedPathWithRetryAtStage(self, &transaction, .atomic_release);
+        };
+        // Never discard a previous stage or its last-good backup. A lost I/O
+        // acknowledgement may have crossed either NTFS visibility point, so
+        // the idempotent replacement must first finish that exact tuple.
+        try recoverAtomicKind(self, kind, bytes.len, &target, &stage, &backup);
+        try writeStageSnapshotWithRetry(self, kind, &stage, bytes);
+        try replaceAtomicWithRetry(self, &target, &stage, &backup, .atomic_publish);
+        const published_size = try pathSizeVisibleWithRetry(self, &target, .atomic_publish);
+        if (published_size == null) {
+            self.recordFailure(.atomic_publish, r4os.r4sys.file_replace_atomic_error_not_found);
+            return error.Io;
+        }
+        if (published_size.? != bytes.len) {
+            self.recordFailure(.atomic_publish, r4os.abi.file_stream_error_size_mismatch);
+            return error.Io;
+        }
+        if (kind == .rtc) try validateRtcRecordAt(self, &target, .atomic_publish);
         try removeAtomicScratch(self, &backup);
-        var transaction_writer = switch (self.files.ownedCreateWriter(transaction.asZ())) {
-            .writer => |value| value,
-            .failure => |fault| {
-                self.recordFailure(.atomic_begin, fault);
-                return mapOpenFault(fault);
-            },
-        };
-        defer _ = transaction_writer.abort();
-        switch (transaction_writer.finishKeepOwnership()) {
-            .ok => {},
-            .failure => |fault| {
-                self.recordFailure(.atomic_begin, fault);
-                return mapOpenFault(fault);
-            },
-            .missing => {
-                self.recordFailure(.atomic_begin, 0);
-                return error.Io;
-            },
-        }
-        var writer = switch (self.files.streamWriter(stage.asZ(), r4os.abi.file_stream_open_replace)) {
-            .writer => |value| value,
-            .failure => |fault| {
-                self.recordFailure(.atomic_stage, fault);
-                return mapOpenFault(fault);
-            },
-        };
-        var finished = false;
-        defer if (!finished) {
-            _ = writer.abort();
-        };
-        var offset: usize = 0;
-        while (offset < bytes.len) {
-            const end = @min(offset + 16 * 1024, bytes.len);
-            switch (writer.write(bytes[offset..end])) {
-                .ok => {},
-                .failure => |fault| {
-                    self.recordFailure(.atomic_stage, fault);
-                    return mapOpenFault(fault);
-                },
-                .missing => {
-                    self.recordFailure(.atomic_stage, 0);
-                    return error.Io;
-                },
-            }
-            offset = end;
-        }
-        switch (writer.finish()) {
-            .ok => finished = true,
-            .failure => |fault| {
-                self.recordFailure(.atomic_stage, fault);
-                return mapOpenFault(fault);
-            },
-            .missing => {
-                self.recordFailure(.atomic_stage, 0);
-                return error.Io;
-            },
-        }
-        switch (self.files.replaceAtomic(target.asZ(), stage.asZ(), backup.asZ(), .{})) {
-            .ok => {},
-            .unsupported => {
-                self.recordFailure(.atomic_publish, r4os.r4sys.file_replace_atomic_error_unsupported);
-                return error.Unsupported;
-            },
-            .failure => |fault| {
-                self.recordFailure(.atomic_publish, fault);
-                return error.Io;
-            },
-            else => {
-                self.recordFailure(.atomic_publish, 0);
-                return error.Io;
-            },
-        }
-        try removeAtomicScratch(self, &backup);
+        if (!abortOwnedPathWithRetryAtStage(self, &transaction, .atomic_release)) return error.Io;
+        transaction_held = false;
         self.failure_stage = .none;
         self.failure_code = 0;
     }
@@ -256,6 +341,96 @@ pub const Store = struct {
         self.failure_code = code;
     }
 };
+
+/// NTFS can transiently lose ordinary name visibility between Stream Begin,
+/// Write and Finish even though the private stage namespace remains owned by
+/// this cartridge transaction. Retry only those namespace/I/O outcomes. An
+/// incomplete attempt is ownership-aborted and removed before the next Begin;
+/// invalid data, conflicts and capacity failures remain immediate failures.
+fn writeStageSnapshotWithRetry(
+    self: *Store,
+    kind: persistence.FileKind,
+    stage: *const r4os.AbsoluteFilePath,
+    bytes: []const u8,
+) persistence.BackendError!void {
+    for (0..create_retry_attempts) |attempt| {
+        writeStageSnapshotOnce(self, stage, bytes) catch |fault| {
+            const failure_stage = self.failure_stage;
+            const failure_code = self.failure_code;
+            if (!retryablePrivateStreamFault(failure_code) or attempt + 1 == create_retry_attempts) return fault;
+
+            // recoverAtomicKind has already completed every older durable
+            // stage, so this private name can only belong to this failed
+            // attempt while the per-digest transaction lease is held.
+            removeAtomicScratch(self, stage) catch |cleanup_fault| return cleanup_fault;
+            self.recordFailure(failure_stage, failure_code);
+            waitForCreateRetry(&self.files);
+            continue;
+        };
+
+        const staged_size = (try pathSizeVisibleWithRetry(self, stage, .atomic_stage_verify)) orelse {
+            self.recordFailure(.atomic_stage_verify, r4os.abi.file_stream_error_not_found);
+            return error.Io;
+        };
+        if (staged_size != bytes.len) {
+            self.recordFailure(.atomic_stage_verify, r4os.abi.file_stream_error_size_mismatch);
+            return error.Io;
+        }
+        if (kind == .rtc) try validateRtcRecordAt(self, stage, .atomic_stage_verify);
+        return;
+    }
+    unreachable;
+}
+
+fn writeStageSnapshotOnce(
+    self: *Store,
+    stage: *const r4os.AbsoluteFilePath,
+    bytes: []const u8,
+) persistence.BackendError!void {
+    var writer = switch (self.files.streamWriter(stage.asZ(), r4os.abi.file_stream_open_replace)) {
+        .writer => |value| value,
+        .failure => |fault| {
+            self.recordFailure(.atomic_stage_begin, fault);
+            return mapOpenFault(fault);
+        },
+    };
+    var finished = false;
+    defer if (!finished) {
+        _ = writer.abort();
+    };
+
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = @min(offset + 16 * 1024, bytes.len);
+        switch (writer.write(bytes[offset..end])) {
+            .ok => {},
+            .failure => |fault| {
+                self.recordFailure(.atomic_stage_write, fault);
+                return mapOpenFault(fault);
+            },
+            .missing => {
+                self.recordFailure(.atomic_stage_write, r4os.abi.file_stream_error_not_found);
+                return error.Io;
+            },
+        }
+        offset = end;
+    }
+    switch (writer.finish()) {
+        .ok => finished = true,
+        .failure => |fault| {
+            self.recordFailure(.atomic_stage_finish, fault);
+            return mapOpenFault(fault);
+        },
+        .missing => {
+            self.recordFailure(.atomic_stage_finish, r4os.abi.file_stream_error_not_found);
+            return error.Io;
+        },
+    }
+}
+
+fn retryablePrivateStreamFault(code: i32) bool {
+    return code == r4os.abi.file_stream_error_not_found or code == r4os.abi.file_stream_error_io;
+}
 
 const async_write_stack: u64 = 128 * 1024;
 
@@ -573,13 +748,324 @@ fn mapThreadFault(code: i32) persistence.BackendError {
 }
 
 fn removeAtomicScratch(self: *Store, path: *const r4os.AbsoluteFilePath) persistence.BackendError!void {
-    switch (self.files.delete(path.asZ())) {
-        .ok, .missing => {},
-        .failure => |fault| {
-            self.recordFailure(.atomic_cleanup, fault);
-            return mapOpenFault(fault);
+    for (0..create_retry_attempts) |attempt| {
+        switch (self.files.delete(path.asZ())) {
+            .ok, .missing => return,
+            .failure => |fault| {
+                if (attempt + 1 == create_retry_attempts) {
+                    self.recordFailure(.atomic_cleanup, fault);
+                    return mapOpenFault(fault);
+                }
+                waitForCreateRetry(&self.files);
+            },
+        }
+    }
+    unreachable;
+}
+
+const AtomicRecoveryState = enum {
+    clean,
+    resume_stage,
+    cleanup_backup,
+    orphan_backup,
+};
+
+fn classifyAtomicRecovery(stage_exists: bool, backup_exists: bool, target_exists: bool) AtomicRecoveryState {
+    if (stage_exists) return .resume_stage;
+    if (!backup_exists) return .clean;
+    return if (target_exists) .cleanup_backup else .orphan_backup;
+}
+
+fn recoverPendingKind(
+    self: *Store,
+    digest: *const [persistence.digest_bytes]u8,
+    kind: persistence.FileKind,
+    expected_size: usize,
+) persistence.BackendError!void {
+    const transaction = makePath(digest, .atomic_lock) catch return error.Io;
+    try beginAtomicTransaction(self, &transaction);
+    var transaction_held = true;
+    defer if (transaction_held) {
+        _ = abortOwnedPathWithRetryAtStage(self, &transaction, .atomic_release);
+    };
+
+    const target = makePath(digest, if (kind == .sram) .sram else .rtc) catch return error.Io;
+    const stage = makePath(digest, if (kind == .sram) .sram_stage else .rtc_stage) catch return error.Io;
+    const backup = makePath(digest, if (kind == .sram) .sram_backup else .rtc_backup) catch return error.Io;
+    try recoverAtomicKind(self, kind, expected_size, &target, &stage, &backup);
+    if (!abortOwnedPathWithRetryAtStage(self, &transaction, .atomic_release)) return error.Io;
+    transaction_held = false;
+}
+
+fn recoverAtomicKind(
+    self: *Store,
+    kind: persistence.FileKind,
+    expected_size: usize,
+    target: *const r4os.AbsoluteFilePath,
+    stage: *const r4os.AbsoluteFilePath,
+    backup: *const r4os.AbsoluteFilePath,
+) persistence.BackendError!void {
+    const stage_size = try pathSizeWithRetry(self, stage, .atomic_recover);
+    const stage_exists = stage_size != null;
+    const backup_exists = try pathExistsWithRetry(self, backup, .atomic_recover);
+    const recovery_target_size = if (!stage_exists and backup_exists)
+        try pathSizeVisibleWithRetry(self, target, .atomic_recover)
+    else
+        null;
+    const target_exists = recovery_target_size != null;
+
+    switch (classifyAtomicRecovery(stage_exists, backup_exists, target_exists)) {
+        .clean => return,
+        .resume_stage => {
+            if (stage_size.? != expected_size) {
+                self.recordFailure(.atomic_recover, r4os.abi.file_stream_error_size_mismatch);
+                return error.Io;
+            }
+            if (kind == .rtc) try validateRtcRecordAt(self, stage, .atomic_recover);
+            try replaceAtomicWithRetry(self, target, stage, backup, .atomic_recover);
+            const target_size = try pathSizeVisibleWithRetry(self, target, .atomic_recover);
+            if (target_size == null) {
+                self.recordFailure(.atomic_recover, r4os.r4sys.file_replace_atomic_error_not_found);
+                return error.Io;
+            }
+            if (target_size.? != expected_size) {
+                self.recordFailure(.atomic_recover, r4os.abi.file_stream_error_size_mismatch);
+                return error.Io;
+            }
+            if (kind == .rtc) try validateRtcRecordAt(self, target, .atomic_recover);
+            try removeAtomicScratch(self, backup);
+        },
+        .cleanup_backup => {
+            if (recovery_target_size.? != expected_size) {
+                self.recordFailure(.atomic_recover, r4os.abi.file_stream_error_size_mismatch);
+                return error.Io;
+            }
+            if (kind == .rtc) try validateRtcRecordAt(self, target, .atomic_recover);
+            try removeAtomicScratch(self, backup);
+        },
+        .orphan_backup => {
+            // The backup is the only known durable object. Preserve it for a
+            // later diagnostic/recovery build instead of converting a
+            // metadata failure into permanent save loss.
+            self.recordFailure(.atomic_recover, r4os.r4sys.file_replace_atomic_error_not_found);
+            return error.Io;
         },
     }
+}
+
+fn pathSizeWithRetry(
+    self: *Store,
+    path: *const r4os.AbsoluteFilePath,
+    failure_stage: FailureStage,
+) persistence.BackendError!?u64 {
+    for (0..create_retry_attempts) |attempt| {
+        switch (self.files.info(path.asZ())) {
+            .value => |info| {
+                if (info.is_dir == 0) return info.size;
+                self.recordFailure(failure_stage, r4os.r4sys.file_replace_atomic_error_conflict);
+                return error.Io;
+            },
+            .missing => return null,
+            .failure => |fault| {
+                if (attempt + 1 == create_retry_attempts) {
+                    self.recordFailure(failure_stage, fault);
+                    return mapOpenFault(fault);
+                }
+                waitForCreateRetry(&self.files);
+            },
+        }
+    }
+    unreachable;
+}
+
+/// A successful atomic replacement can become durable one metadata gate
+/// before an ordinary lookup observes the canonical name. Retry both an I/O
+/// result and a transient Missing result before deciding that no target is
+/// resolvable; the backup stays untouched throughout this window.
+fn pathSizeVisibleWithRetry(
+    self: *Store,
+    path: *const r4os.AbsoluteFilePath,
+    failure_stage: FailureStage,
+) persistence.BackendError!?u64 {
+    for (0..create_retry_attempts) |attempt| {
+        switch (self.files.info(path.asZ())) {
+            .value => |info| {
+                if (info.is_dir == 0) return info.size;
+                self.recordFailure(failure_stage, r4os.r4sys.file_replace_atomic_error_conflict);
+                return error.Io;
+            },
+            .missing => {
+                if (attempt + 1 == create_retry_attempts) return null;
+                waitForCreateRetry(&self.files);
+            },
+            .failure => |fault| {
+                if (attempt + 1 == create_retry_attempts) {
+                    self.recordFailure(failure_stage, fault);
+                    return mapOpenFault(fault);
+                }
+                waitForCreateRetry(&self.files);
+            },
+        }
+    }
+    unreachable;
+}
+
+fn validateRtcRecordAt(
+    self: *Store,
+    path: *const r4os.AbsoluteFilePath,
+    failure_stage: FailureStage,
+) persistence.BackendError!void {
+    var encoded: [persistence.rtc_record_bytes]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < encoded.len) {
+        const transferred = read_retry: {
+            for (0..create_retry_attempts) |attempt| {
+                switch (self.files.readAt(path.asZ(), @intCast(offset), encoded[offset..])) {
+                    .bytes => |count| break :read_retry count,
+                    .end => {
+                        self.recordFailure(failure_stage, r4os.abi.file_stream_error_size_mismatch);
+                        return error.Io;
+                    },
+                    .failure => |fault| {
+                        if (attempt + 1 == create_retry_attempts) {
+                            self.recordFailure(failure_stage, fault);
+                            return mapOpenFault(fault);
+                        }
+                        waitForCreateRetry(&self.files);
+                    },
+                }
+            }
+            unreachable;
+        };
+        if (transferred == 0 or transferred > encoded.len - offset) {
+            self.recordFailure(failure_stage, r4os.abi.file_stream_error_size_mismatch);
+            return error.Io;
+        }
+        offset += transferred;
+    }
+    _ = persistence.decodeRtc(encoded[0..]) catch {
+        self.recordFailure(failure_stage, r4os.abi.file_stream_error_invalid);
+        return error.Io;
+    };
+}
+
+fn beginAtomicTransaction(
+    self: *Store,
+    transaction: *const r4os.AbsoluteFilePath,
+) persistence.BackendError!void {
+    try removeAtomicScratch(self, transaction);
+    for (0..create_retry_attempts) |attempt| {
+        var writer = switch (self.files.ownedCreateWriter(transaction.asZ())) {
+            .writer => |value| value,
+            .failure => |fault| {
+                self.recordFailure(.atomic_begin_create, fault);
+                if (!retryablePrivateStreamFault(fault) or attempt + 1 == create_retry_attempts)
+                    return mapOpenFault(fault);
+
+                // Begin may have published the private lease while losing
+                // its acknowledgement. Abort releases a still-bound slot;
+                // if ownership was already lost, the next lease Begin alone
+                // is allowed to reclaim the transient orphan.
+                if (!abortOwnedPathWithRetryAtStage(self, transaction, .atomic_begin_abort)) return error.Io;
+                self.recordFailure(.atomic_begin_create, fault);
+                waitForCreateRetry(&self.files);
+                continue;
+            },
+        };
+
+        const lock_body = "R4GB_ATOMIC_LOCK=1\n";
+        const write_fault: ?i32 = switch (writer.write(lock_body)) {
+            .ok => null,
+            .failure => |fault| fault,
+            .missing => r4os.abi.file_stream_error_not_found,
+        };
+        if (write_fault) |fault| {
+            self.recordFailure(.atomic_begin_write, fault);
+            if (!abortOwnedPathWithRetryAtStage(self, transaction, .atomic_begin_abort)) return error.Io;
+            self.recordFailure(.atomic_begin_write, fault);
+            if (!retryablePrivateStreamFault(fault) or attempt + 1 == create_retry_attempts)
+                return mapOpenFault(fault);
+            waitForCreateRetry(&self.files);
+            continue;
+        }
+
+        const finish_fault: ?i32 = switch (writer.finishKeepOwnership()) {
+            .ok => return,
+            .failure => |fault| fault,
+            .missing => r4os.abi.file_stream_error_not_found,
+        };
+        const fault = finish_fault.?;
+        self.recordFailure(.atomic_begin_finish, fault);
+        if (!abortOwnedPathWithRetryAtStage(self, transaction, .atomic_begin_abort)) return error.Io;
+        self.recordFailure(.atomic_begin_finish, fault);
+        if (!retryablePrivateStreamFault(fault) or attempt + 1 == create_retry_attempts)
+            return mapOpenFault(fault);
+        waitForCreateRetry(&self.files);
+    }
+    unreachable;
+}
+
+fn pathExistsWithRetry(
+    self: *Store,
+    path: *const r4os.AbsoluteFilePath,
+    failure_stage: FailureStage,
+) persistence.BackendError!bool {
+    for (0..create_retry_attempts) |attempt| {
+        switch (self.files.info(path.asZ())) {
+            .value => |info| {
+                if (info.is_dir == 0) return true;
+                self.recordFailure(failure_stage, r4os.r4sys.file_replace_atomic_error_conflict);
+                return error.Io;
+            },
+            .missing => return false,
+            .failure => |fault| {
+                if (attempt + 1 == create_retry_attempts) {
+                    self.recordFailure(failure_stage, fault);
+                    return mapOpenFault(fault);
+                }
+                waitForCreateRetry(&self.files);
+            },
+        }
+    }
+    unreachable;
+}
+
+fn replaceAtomicWithRetry(
+    self: *Store,
+    target: *const r4os.AbsoluteFilePath,
+    stage: *const r4os.AbsoluteFilePath,
+    backup: *const r4os.AbsoluteFilePath,
+    failure_stage: FailureStage,
+) persistence.BackendError!void {
+    for (0..create_retry_attempts) |attempt| {
+        switch (self.files.replaceAtomic(target.asZ(), stage.asZ(), backup.asZ(), .{})) {
+            .ok => return,
+            .unsupported => {
+                self.recordFailure(failure_stage, r4os.r4sys.file_replace_atomic_error_unsupported);
+                return error.Unsupported;
+            },
+            .conflict => {
+                self.recordFailure(failure_stage, r4os.r4sys.file_replace_atomic_error_conflict);
+                return error.Busy;
+            },
+            .missing => {
+                self.recordFailure(failure_stage, r4os.r4sys.file_replace_atomic_error_not_found);
+                return error.Io;
+            },
+            .bad_path => {
+                self.recordFailure(failure_stage, r4os.r4sys.file_replace_atomic_error_bad_path);
+                return error.Io;
+            },
+            .failure => |fault| {
+                if (fault != r4os.r4sys.file_replace_atomic_error_io or attempt + 1 == create_retry_attempts) {
+                    self.recordFailure(failure_stage, fault);
+                    return error.Io;
+                }
+                waitForCreateRetry(&self.files);
+            },
+        }
+    }
+    unreachable;
 }
 
 /// Exposes only the two durable data names for product diagnostics. Atomic
@@ -590,10 +1076,9 @@ pub fn dataPath(digest: *const [persistence.digest_bytes]u8, kind: persistence.F
 
 fn ensureSaveRoot(files: *const r4os.app_storage.Files) persistence.BackendError!void {
     const directories = [_][]const u8{
-        "C:\\R4OS\\APPDATA",
-        "C:\\R4OS\\APPDATA\\SUBSYSTEMS",
-        "C:\\R4OS\\APPDATA\\SUBSYSTEMS\\r4os.gb",
-        "C:\\R4OS\\APPDATA\\SUBSYSTEMS\\r4os.gb\\SAVE",
+        "C:\\R4OS\\SUBSYSTEMS",
+        "C:\\R4OS\\SUBSYSTEMS\\r4os.gb",
+        "C:\\R4OS\\SUBSYSTEMS\\r4os.gb\\SAVE",
     };
     for (directories) |raw| {
         const path = r4os.AbsoluteFilePath.parse(raw) catch return error.Io;
@@ -664,11 +1149,19 @@ fn createOwnedLock(
 /// bounded retries can retire only this process' exact lease before Begin is
 /// attempted again; a competing cartridge instance is never deleted by path.
 fn abortOwnedPathWithRetry(self: *Store, path: *const r4os.AbsoluteFilePath) bool {
+    return abortOwnedPathWithRetryAtStage(self, path, .lock_abort);
+}
+
+fn abortOwnedPathWithRetryAtStage(
+    self: *Store,
+    path: *const r4os.AbsoluteFilePath,
+    failure_stage: FailureStage,
+) bool {
     for (0..create_retry_attempts) |attempt| {
         const raw = self.files.sys.fileStreamAbort(path.asZ().ptr);
         if (raw == r4os.abi.file_stream_result_ok or raw == r4os.abi.file_stream_error_not_found) return true;
         if (raw != r4os.abi.file_stream_error_io or attempt + 1 == create_retry_attempts) {
-            self.recordFailure(.lock_abort, raw);
+            self.recordFailure(failure_stage, raw);
             return false;
         }
         waitForCreateRetry(&self.files);
@@ -764,4 +1257,30 @@ pub fn wallSeconds(state: r4os.abi.TimeState) ?i64 {
 
 fn isLeap(year: u16) bool {
     return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0);
+}
+
+test "canonical save path stays below the installed subsystem" {
+    const digest = [_]u8{0xAB} ** persistence.digest_bytes;
+    const canonical = try dataPath(&digest, .sram);
+
+    try std.testing.expect(std.mem.startsWith(u8, canonical.bytes(), persistence.save_root));
+    try std.testing.expect(std.mem.endsWith(u8, canonical.bytes(), ".SAV"));
+    try std.testing.expect(std.mem.indexOf(u8, canonical.bytes(), "\\APPDATA\\") == null);
+}
+
+test "atomic recovery never removes an orphaned last-good backup" {
+    try std.testing.expectEqual(AtomicRecoveryState.clean, classifyAtomicRecovery(false, false, false));
+    try std.testing.expectEqual(AtomicRecoveryState.resume_stage, classifyAtomicRecovery(true, false, false));
+    try std.testing.expectEqual(AtomicRecoveryState.resume_stage, classifyAtomicRecovery(true, true, false));
+    try std.testing.expectEqual(AtomicRecoveryState.cleanup_backup, classifyAtomicRecovery(false, true, true));
+    try std.testing.expectEqual(AtomicRecoveryState.orphan_backup, classifyAtomicRecovery(false, true, false));
+}
+
+test "private stream retries are limited to transient namespace outcomes" {
+    try std.testing.expect(retryablePrivateStreamFault(r4os.abi.file_stream_error_not_found));
+    try std.testing.expect(retryablePrivateStreamFault(r4os.abi.file_stream_error_io));
+    try std.testing.expect(!retryablePrivateStreamFault(r4os.abi.file_stream_error_invalid));
+    try std.testing.expect(!retryablePrivateStreamFault(r4os.abi.file_stream_error_exists));
+    try std.testing.expect(!retryablePrivateStreamFault(r4os.abi.file_stream_error_size_mismatch));
+    try std.testing.expect(!retryablePrivateStreamFault(r4os.abi.file_stream_error_too_large));
 }
