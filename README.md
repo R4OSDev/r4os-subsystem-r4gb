@@ -54,6 +54,11 @@ canonical target is independently resolvable with the expected size and, for
 RTC, valid content. A real competing writer remains a Busy error. Wall-clock
 recovery is bounded and cannot run the RTC backwards; save states are
 deliberately absent.
+The lease, immutable-snapshot worker and atomic recovery implementation is now
+the compiled-in `r4os.subsystem_persistence` SDK source helper shared with
+R4SNES. R4GB still owns every cartridge decision, RTC byte format and clock
+rule; the migration adds neither an R4L nor a platform ABI and retains the
+complete existing persistence behavior.
 The former APPDATA path is never probed at runtime. Installations that used the
 short-lived pre-release path must copy validated SAV/RTC files to the canonical
 root before starting the corresponding cartridge.

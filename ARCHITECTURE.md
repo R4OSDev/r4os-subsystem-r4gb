@@ -22,7 +22,7 @@ The component boundaries are:
 | `joypad` | P1 selection and eight active-low buttons | keyboard identities |
 | `serial` | SB/SC and transfer timing seam | link transport |
 | `persistence` | ROM identity, battery SRAM/RTC format and flush policy | host filesystem implementation or save-state snapshots |
-| `persistence_r4os` | R4SYS-backed leases, exact reads and same-directory atomic replacement | cartridge or emulated-time behavior |
+| `persistence_r4os` | thin R4GB configuration of the compiled-in SDK lease, serial-worker and atomic-recovery source helper | cartridge or emulated-time behavior |
 | `host_adapter` | R4SUBSYS1 and R4OS window/input translation | guest hardware behavior or scheduling |
 | `runtime_adapter` | one bounded guest slice, frame readiness and caller-owned PCM handoff | APU timing or AUDSVC implementation |
 | `product_host` | one launch's ROM, machine, save lease, generation-safe surface, explicit host actions and idempotent teardown | global emulator state or direct kernel/audio access |
@@ -180,6 +180,10 @@ leases left by a crashed process without allowing a stale generation to
 release a newer owner. If a fresh NTFS mutation loses its acknowledgement,
 R4GB retries only the R4SYS ownership-checked abort for its exact lease before
 retrying Begin; it never removes a competing instance's lock by pathname.
+The implementation now comes from `r4os.subsystem_persistence`, compiled into
+the module from SDK source. R4GB continues to own battery policy, SRAM sizing,
+its 80-byte MBC3 RTC codec and offline-time semantics. No R4L, ABI, alternate
+save path or migration probe was introduced.
 
 ## Test boundary
 

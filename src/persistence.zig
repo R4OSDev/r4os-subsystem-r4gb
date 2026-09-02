@@ -1,5 +1,7 @@
 const std = @import("std");
+const r4os = @import("r4os");
 const cartridge = @import("cartridge.zig");
+const shared = r4os.subsystem_persistence;
 
 pub const save_root = "C:\\R4OS\\SUBSYSTEMS\\r4os.gb\\SAVE\\";
 pub const digest_bytes = cartridge.rom_digest_bytes;
@@ -10,55 +12,14 @@ pub const rtc_record_bytes: usize = 80;
 pub const rtc_record_version: u16 = 1;
 const rtc_magic = "R4GBRTC1";
 
-pub const FileKind = enum { sram, rtc };
+comptime {
+    if (digest_bytes != shared.digest_bytes) @compileError("unexpected Game Boy digest width");
+}
 
-pub const ReadResult = enum {
-    ok,
-    missing,
-    wrong_size,
-    io,
-};
-
-pub const BackendError = error{
-    Busy,
-    Io,
-    Full,
-    Unsupported,
-};
-
-/// Narrow persistence port. The product implementation is backed exclusively
-/// by the public App Files facade; deterministic tests use the same contract
-/// without smuggling host filesystem APIs into the emulator core.
-pub const Backend = struct {
-    context: *anyopaque,
-    acquire_fn: *const fn (*anyopaque, *const [digest_bytes]u8, u64) BackendError!void,
-    release_fn: *const fn (*anyopaque, *const [digest_bytes]u8, u64) BackendError!void,
-    read_exact_fn: *const fn (*anyopaque, *const [digest_bytes]u8, FileKind, []u8) ReadResult,
-    write_atomic_fn: *const fn (*anyopaque, *const [digest_bytes]u8, FileKind, []const u8) BackendError!void,
-    poll_fn: ?*const fn (*anyopaque) BackendError!void = null,
-
-    pub fn acquire(self: Backend, digest: *const [digest_bytes]u8, generation: u64) BackendError!void {
-        return self.acquire_fn(self.context, digest, generation);
-    }
-
-    pub fn release(self: Backend, digest: *const [digest_bytes]u8, generation: u64) BackendError!void {
-        return self.release_fn(self.context, digest, generation);
-    }
-
-    pub fn readExact(self: Backend, digest: *const [digest_bytes]u8, kind: FileKind, out: []u8) ReadResult {
-        return self.read_exact_fn(self.context, digest, kind, out);
-    }
-
-    pub fn writeAtomic(self: Backend, digest: *const [digest_bytes]u8, kind: FileKind, bytes: []const u8) BackendError!void {
-        return self.write_atomic_fn(self.context, digest, kind, bytes);
-    }
-
-    /// Gives asynchronous product backends a non-blocking completion point.
-    /// Deterministic in-memory backends remain synchronous and omit it.
-    pub fn poll(self: Backend) BackendError!void {
-        if (self.poll_fn) |callback| try callback(self.context);
-    }
-};
+pub const FileKind = shared.FileKind;
+pub const ReadResult = shared.ReadResult;
+pub const BackendError = shared.BackendError;
+pub const Backend = shared.Backend;
 
 pub const OpenError = BackendError || error{
     InvalidGeneration,
