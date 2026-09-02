@@ -80,7 +80,15 @@ fn step(context: *anyopaque, budget: u32, guest_now_ns: u64) runtime.StepResult 
         }
         if (self.completion_witness) |witness| {
             const offset: usize = @as(usize, witness.address) - 0xC000;
-            if (self.machine.bus.work_ram[offset] == witness.value) self.source_finished = true;
+            // A physical completion key may arrive while the cooperative
+            // scheduler still owes bounded work from an earlier host gap.
+            // Finish only after that debt is drained, otherwise the report
+            // compares the machine against a newer runtime timestamp.
+            if (self.machine.bus.work_ram[offset] == witness.value and
+                self.machine.guest_clock.pending_t_cycles == 0)
+            {
+                self.source_finished = true;
+            }
         }
     }
 

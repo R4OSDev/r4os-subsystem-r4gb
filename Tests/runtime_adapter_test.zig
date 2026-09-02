@@ -145,7 +145,13 @@ test "WRAM completion witness stops guest work and drains audio exactly once" {
     _ = driver.step(core.clock.frame_t_cycles, 0);
     _ = driver.step(core.clock.frame_t_cycles, 20 * std.time.ns_per_ms);
     machine.bus.work_ram[1] = 0xA5;
-    _ = driver.step(core.clock.frame_t_cycles, 20 * std.time.ns_per_ms);
+    _ = driver.step(core.clock.frame_t_cycles, 100 * std.time.ns_per_ms);
+    try std.testing.expect(machine.guest_clock.pending_t_cycles != 0);
+    try std.testing.expect(!adapter.source_finished);
+    while (machine.guest_clock.pending_t_cycles != 0) {
+        _ = driver.step(core.clock.frame_t_cycles, 100 * std.time.ns_per_ms);
+    }
+    _ = driver.step(core.clock.frame_t_cycles, 100 * std.time.ns_per_ms);
     try std.testing.expect(adapter.source_finished);
     const finished_cycles = machine.guest_t_cycles;
 
