@@ -130,6 +130,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_product_host_tests.step);
     test_step.dependOn(&run_maturity.step);
 
+    const short_test_step = b.step("unit-test", "Run bounded R4GB owner tests without the maturity profile");
+    short_test_step.dependOn(&run_unit_tests.step);
+    short_test_step.dependOn(&run_apu_tests.step);
+    short_test_step.dependOn(&run_video_host_tests.step);
+    short_test_step.dependOn(&run_runtime_adapter_tests.step);
+    short_test_step.dependOn(&run_persistence_tests.step);
+    short_test_step.dependOn(&run_persistence_r4os_tests.step);
+    short_test_step.dependOn(&run_product_host_tests.step);
+
     const reference_step = b.step("reference-test", "Validate all available pinned SM83 vectors and open ROM fixtures");
     reference_step.dependOn(&run_references.step);
 
