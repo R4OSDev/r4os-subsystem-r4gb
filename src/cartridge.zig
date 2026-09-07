@@ -493,6 +493,7 @@ pub const Cartridge = struct {
     allocator: std.mem.Allocator,
     header: Header,
     rom: []const u8,
+    owns_rom: bool = true,
     rom_digest: [rom_digest_bytes]u8,
     external_ram: []u8,
     mapper: MapperState = .{},
@@ -513,16 +514,35 @@ pub const Cartridge = struct {
         return initOwnedWithHeader(allocator, owned_image, header);
     }
 
+    /// The caller retains one immutable ROM until all cartridges are destroyed.
+    pub fn borrow(allocator: std.mem.Allocator, image: []const u8) (Error || std.mem.Allocator.Error)!Cartridge {
+        const header = try parse(image);
+        var digest: [rom_digest_bytes]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(image, &digest, .{});
+        return initWithIdentity(allocator, image, header, digest, false);
+    }
+
+    /// Reuse validated immutable metadata while allocating fresh mutable RAM.
+    pub fn resetBorrowed(self: *const Cartridge, allocator: std.mem.Allocator) std.mem.Allocator.Error!Cartridge {
+        std.debug.assert(!self.owns_rom);
+        return initWithIdentity(allocator, self.rom, self.header, self.rom_digest, false);
+    }
+
     fn initOwnedWithHeader(allocator: std.mem.Allocator, owned_image: []u8, header: Header) std.mem.Allocator.Error!Cartridge {
+        var digest: [rom_digest_bytes]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(owned_image, &digest, .{});
+        return initWithIdentity(allocator, owned_image, header, digest, true);
+    }
+
+    fn initWithIdentity(allocator: std.mem.Allocator, image: []const u8, header: Header, digest: [rom_digest_bytes]u8, owns_rom: bool) std.mem.Allocator.Error!Cartridge {
         const ram_len: usize = if (header.mapper == .mbc2) 512 else header.expected_ram_bytes;
         const external_ram = try allocator.alloc(u8, ram_len);
         @memset(external_ram, 0xFF);
-        var digest: [rom_digest_bytes]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(owned_image, &digest, .{});
         return .{
             .allocator = allocator,
             .header = header,
-            .rom = owned_image,
+            .rom = image,
+            .owns_rom = owns_rom,
             .rom_digest = digest,
             .external_ram = external_ram,
         };
@@ -530,7 +550,7 @@ pub const Cartridge = struct {
 
     pub fn deinit(self: *Cartridge) void {
         self.allocator.free(self.external_ram);
-        self.allocator.free(self.rom);
+        if (self.owns_rom) self.allocator.free(self.rom);
         self.* = undefined;
     }
 

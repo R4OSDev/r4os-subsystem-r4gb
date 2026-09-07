@@ -133,7 +133,7 @@ pub const Guest = struct {
         self.rom_image = image;
         errdefer _ = self.close();
 
-        const cart = try cartridge.Cartridge.init(self.allocator, image);
+        const cart = try cartridge.Cartridge.borrow(self.allocator, image);
         self.machine = machine_module.Machine.init(model.production_revision, cart);
         self.stats.machine_creates +%= 1;
         const point = self.time.now();
@@ -229,17 +229,18 @@ pub const Guest = struct {
 
     pub fn reset(self: *Guest) i32 {
         if (self.state != .running or !self.runtime_guest_ready) return runtime_error_closed;
-        const image = self.rom_image orelse return runtime_error_closed;
+        if (self.rom_image == null) return runtime_error_closed;
         const old_machine = if (self.machine) |*value| value else return runtime_error_closed;
         if (self.save_session) |*session| {
             const point = self.time.now();
             session.flush(&old_machine.cartridge, point.wall_seconds, point.monotonic_ns) catch return reset_error_persistence;
         }
 
-        var replacement_cart = cartridge.Cartridge.init(self.allocator, image) catch return reset_error_cartridge;
+        var replacement_cart = old_machine.cartridge.resetBorrowed(self.allocator) catch return reset_error_cartridge;
+        var replacement_owned = true;
+        defer if (replacement_owned) replacement_cart.deinit();
         if (self.save_session) |session| if (session.enabled) {
             if (replacement_cart.external_ram.len != old_machine.cartridge.external_ram.len) {
-                replacement_cart.deinit();
                 return reset_error_cartridge;
             }
             @memcpy(replacement_cart.external_ram, old_machine.cartridge.external_ram);
@@ -247,20 +248,33 @@ pub const Guest = struct {
             replacement_cart.mapper.rtc_latched = old_machine.cartridge.mapper.rtc_latched;
             replacement_cart.clearPersistenceDirty();
         };
-        const replacement = machine_module.Machine.init(model.production_revision, replacement_cart);
+        var replacement = machine_module.Machine.init(model.production_revision, replacement_cart);
+        const next_generation = if (self.generation == std.math.maxInt(u64)) 1 else self.generation + 1;
+        var replacement_video = self.video;
+        var replacement_presenter: host_api.Presenter = undefined;
+        var replacement_palette = self.palette;
+        if (self.presenter) |presenter| {
+            replacement_presenter = presenter.*;
+            replacement_video.bind(&replacement.ppu, &replacement_palette, &replacement_presenter, next_generation) catch return reset_error_video;
+        }
 
         old_machine.apu.endCapture();
         old_machine.deinit();
         self.stats.machine_destroys +%= 1;
         old_machine.* = replacement;
+        replacement_owned = false;
         self.stats.machine_creates +%= 1;
-        self.generation +%= 1;
-        if (self.generation == 0) self.generation = 1;
+        self.generation = next_generation;
         if (self.save_session) |*session| session.last_flush_guest_tick = 0;
         self.runtime_guest = runtime_adapter.Adapter.init(old_machine);
         if (self.completion_witness) |witness| self.runtime_guest.setCompletionWitness(witness) catch unreachable;
         if (self.presenter) |presenter| {
-            self.video.bind(&old_machine.ppu, &self.palette, presenter, self.generation) catch return reset_error_video;
+            self.palette = replacement_palette;
+            replacement_video.source = &old_machine.ppu;
+            replacement_presenter.surface.storage.indexed8.pixels = old_machine.ppu.framebuffer[0..];
+            replacement_presenter.surface.storage.indexed8.palette = self.palette[0..];
+            self.video = replacement_video;
+            presenter.* = replacement_presenter;
         }
         self.stats.resets +%= 1;
         return 0;

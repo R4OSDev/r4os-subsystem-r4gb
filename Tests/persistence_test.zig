@@ -56,6 +56,7 @@ const FakeStore = struct {
                 if (self.sram_len != out.len) return .wrong_size;
                 @memcpy(out, self.sram[0..self.sram_len]);
             },
+            .sram_delta => return .missing,
             .rtc => {
                 if (!self.rtc_present) return .missing;
                 if (out.len != self.rtc.len) return .wrong_size;
@@ -82,6 +83,7 @@ const FakeStore = struct {
                 @memcpy(self.sram[0..bytes.len], bytes);
                 self.sram_len = bytes.len;
             },
+            .sram_delta => return error.Unsupported,
             .rtc => {
                 if (bytes.len != self.rtc.len) return error.Io;
                 @memcpy(self.rtc[0..], bytes);

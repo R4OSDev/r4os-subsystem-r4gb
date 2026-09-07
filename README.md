@@ -21,6 +21,12 @@ MMM01, and digital HuC1 banking. Every legal base and CB opcode runs through
 explicit read, write, and idle M-cycle callbacks. Host waits and slice sizes
 cannot alter device order or guest results.
 
+Since 0.10.12 the product host retains the only immutable ROM allocation.
+Cartridge and reset replacements borrow it and reuse the validated header
+and digest. Reset allocates fresh mutable RAM without another ROM copy or
+ROM hash; preparation failure leaves the previous guest usable. Maximum live
+ROM storage is therefore 8 MB both during play and reset, formerly 16/24 MB.
+
 DIV/TIMA falling edges, delayed reload writes, IF/IE dispatch retargeting,
 HALT/STOP wake behavior, the two-M-cycle DMA start delay, all 160 DMA bytes,
 the active-low P1 matrix, and the DMG 8192-Hz internal serial clock are modeled
@@ -95,9 +101,10 @@ cycle, publishes the native 160x144 Indexed8 surface through
 maximize preserve aspect ratio and letterboxing; unchanged frames are not
 republished. Focus loss releases every held guest button. F5 pauses, F6
 resumes, F8 creates a fresh machine generation, F9 mutes, and F10 unmutes.
-Reset, runtime failure, normal window Close, and repeated Close all converge
-on the same idempotent teardown of audio, video, persistence, machine, and ROM
-ownership. Load, CGB, mapper, accessory, save, and runtime failures remain in
+Reset preserves the persistence lease and replaces the prepared machine.
+Runtime failure, normal window Close, and repeated Close converge on the same
+idempotent teardown of audio, video, persistence, machine, and ROM ownership.
+Load, CGB, mapper, accessory, save, and runtime failures remain in
 the cartridge's own window with a concrete diagnosis.
 
 The installed `MODULES.JSON` entry is the only source for the subsystem host,

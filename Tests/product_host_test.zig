@@ -82,6 +82,7 @@ const FakeStore = struct {
                 if (self.sram_len != out.len) return .wrong_size;
                 @memcpy(out, self.sram[0..self.sram_len]);
             },
+            .sram_delta => return .missing,
             .rtc => {
                 if (!self.rtc_present) return .missing;
                 if (out.len != self.rtc.len) return .wrong_size;
@@ -107,6 +108,7 @@ const FakeStore = struct {
                 @memcpy(self.sram[0..bytes.len], bytes);
                 self.sram_len = bytes.len;
             },
+            .sram_delta => return error.Unsupported,
             .rtc => {
                 if (bytes.len != self.rtc.len) return error.Io;
                 @memcpy(&self.rtc, bytes);
@@ -298,6 +300,13 @@ test "reset rebinds a fresh video generation and preserves flushed battery RAM" 
     guest.machine.?.ppu.framebuffer[0] = 3;
     guest.machine.?.apu.beginCapture();
     guest.machine.?.apu.tick(0, 1);
+    guest.video.generation = guest.generation + 1;
+    const old_pixels = presenter.surface.indexedPixels().?.ptr;
+    try std.testing.expectEqual(product.reset_error_video, guest.reset());
+    try std.testing.expectEqual(old_pixels, presenter.surface.indexedPixels().?.ptr);
+    try std.testing.expectEqual(@as(u8, 3), guest.machine.?.ppu.framebuffer[0]);
+    try std.testing.expectEqual(original_generation, guest.generation);
+    guest.video.generation = original_generation;
     try std.testing.expectEqual(@as(i32, 0), guest.reset());
     try std.testing.expectEqual(original_generation + 1, guest.video.generation);
     try std.testing.expectEqual(@as(u8, 0x5A), guest.machine.?.cartridge.external_ram[0]);
@@ -307,6 +316,31 @@ test "reset rebinds a fresh video generation and preserves flushed battery RAM" 
     try std.testing.expectEqual(completion.value, guest.runtime_guest.completion_witness.?.value);
     try std.testing.expectEqual(@intFromPtr(&guest.machine.?.ppu.framebuffer[0]), @intFromPtr(presenter.surface.indexedPixels().?.ptr));
     try std.testing.expect(store.write_calls >= 1);
+}
+
+test "borrowed ROM reset allocates only mutable RAM and failure retains the old machine" {
+    var allocations = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = allocations.allocator();
+    var store = FakeStore{};
+    var time = FakeTime{};
+    var guest = product.Guest.init(allocator, store.backend(), time.source(), 41);
+    try guest.openOwned(try makeRom(allocator, "BORROW RESET", 0x03, 0x02));
+    defer _ = guest.close();
+    const source = guest.rom_image.?;
+    try std.testing.expectEqual(source.ptr, guest.machine.?.cartridge.rom.ptr);
+    try std.testing.expect(!guest.machine.?.cartridge.owns_rom);
+    const generation = guest.generation;
+    allocations.fail_index = allocations.alloc_index;
+    try std.testing.expectEqual(product.reset_error_cartridge, guest.reset());
+    try std.testing.expectEqual(generation, guest.generation);
+    try std.testing.expect(guest.runtime_guest_ready and store.owner);
+    allocations.fail_index = std.math.maxInt(usize);
+    const before = allocations.allocated_bytes;
+    const ram_bytes = guest.machine.?.cartridge.external_ram.len;
+    try std.testing.expectEqual(@as(i32, 0), guest.reset());
+    try std.testing.expectEqual(ram_bytes, allocations.allocated_bytes - before);
+    try std.testing.expectEqual(source.ptr, guest.machine.?.cartridge.rom.ptr);
+    std.debug.print("GB live ROM bytes load/reset: {d}/{d}; maximum source=8388608\n", .{ source.len, source.len });
 }
 
 test "clean battery and RTC sessions keep time and asynchronous backend polling" {
