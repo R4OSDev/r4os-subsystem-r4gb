@@ -319,15 +319,17 @@ pub const Guest = struct {
         self.stats.maximum_slice_operations = @max(self.stats.maximum_slice_operations, result.operations);
         if (result.status == .failed) return result;
         if (self.save_session) |*session| {
-            const machine = if (self.machine) |*value| value else return runtime_api.StepResult.fail(runtime_error_closed);
-            const point = self.time.now();
-            const flushed = session.maybeFlush(
-                &machine.cartridge,
-                machine.guest_t_cycles,
-                point.wall_seconds,
-                point.monotonic_ns,
-            ) catch return runtime_api.StepResult.fail(runtime_error_persistence).withOperations(result.operations);
-            if (flushed) self.stats.flushes +%= 1;
+            if (session.enabled) {
+                const machine = if (self.machine) |*value| value else return runtime_api.StepResult.fail(runtime_error_closed);
+                const point = self.time.now();
+                const flushed = session.maybeFlush(
+                    &machine.cartridge,
+                    machine.guest_t_cycles,
+                    point.wall_seconds,
+                    point.monotonic_ns,
+                ) catch return runtime_api.StepResult.fail(runtime_error_persistence).withOperations(result.operations);
+                if (flushed) self.stats.flushes +%= 1;
+            }
         }
         return result;
     }

@@ -168,6 +168,9 @@ registers, subsecond T-cycles, wall and monotonic anchors, and the owning
 generation. Missing files mean a fresh cartridge. A wrong SRAM length or an
 invalid RTC record is reported as corruption rather than silently rewritten.
 Non-battery cartridges never acquire a lease or access the save directory.
+Since 0.78.6, their product step also skips the wall/monotonic time provider
+before maybeFlush. Enabled sessions still receive both clocks and poll the
+asynchronous backend even while clean; battery/RTC flush and Close are unchanged.
 
 One retained create-only `HASH.LCK` stream grants exclusive write ownership to
 one cartridge instance. Flushes write a finished same-directory stage and use

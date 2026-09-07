@@ -8,6 +8,7 @@ const runtime_api = r4os.subsystem_runtime;
 const FakeTime = struct {
     wall: ?i64 = 1_000,
     monotonic: u64 = 10,
+    calls: u32 = 0,
 
     fn source(self: *FakeTime) product.TimeSource {
         return .{ .context = self, .now_fn = now };
@@ -15,6 +16,7 @@ const FakeTime = struct {
 
     fn now(context: *anyopaque) product.TimePoint {
         const self: *FakeTime = @ptrCast(@alignCast(context));
+        self.calls += 1;
         return .{ .wall_seconds = self.wall, .monotonic_ns = self.monotonic };
     }
 };
@@ -31,6 +33,7 @@ const FakeStore = struct {
     acquire_calls: u32 = 0,
     release_calls: u32 = 0,
     write_calls: u32 = 0,
+    poll_calls: u32 = 0,
 
     fn backend(self: *FakeStore) core.persistence.Backend {
         return .{
@@ -39,7 +42,13 @@ const FakeStore = struct {
             .release_fn = release,
             .read_exact_fn = readExact,
             .write_atomic_fn = writeAtomic,
+            .poll_fn = poll,
         };
+    }
+
+    fn poll(context: *anyopaque) core.persistence.BackendError!void {
+        const self: *FakeStore = @ptrCast(@alignCast(context));
+        self.poll_calls += 1;
     }
 
     fn acquire(context: *anyopaque, digest: *const [core.persistence.digest_bytes]u8, generation: u64) core.persistence.BackendError!void {
@@ -183,6 +192,7 @@ test "parallel private guests isolate different ROMs and allow same-ROM instance
     first.focusLost(3);
     try std.testing.expectEqual(@as(u8, 0), first.machine.?.joypad.held);
 
+    const time_calls_before_slices = time.calls;
     var first_runtime = try makeRuntime();
     var second_runtime = try makeRuntime();
     var first_host = IdleHost{};
@@ -195,6 +205,9 @@ test "parallel private guests isolate different ROMs and allow same-ROM instance
     try std.testing.expect(first.stats.maximum_slice_operations <= product.slice_budget_t_cycles + 24);
     try std.testing.expect(second.stats.maximum_slice_operations <= product.slice_budget_t_cycles + 24);
     try std.testing.expect(first.machine.?.guest_t_cycles != 0 and second.machine.?.guest_t_cycles != 0);
+
+    try std.testing.expectEqual(time_calls_before_slices, time.calls);
+    try std.testing.expectEqual(@as(u32, 0), store.poll_calls);
 
     first_runtime.request(.pause, 10, first.driver());
     const guest_ns_before_pause = first_runtime.clock.guest_ns;
@@ -294,6 +307,23 @@ test "reset rebinds a fresh video generation and preserves flushed battery RAM" 
     try std.testing.expectEqual(completion.value, guest.runtime_guest.completion_witness.?.value);
     try std.testing.expectEqual(@intFromPtr(&guest.machine.?.ppu.framebuffer[0]), @intFromPtr(presenter.surface.indexedPixels().?.ptr));
     try std.testing.expect(store.write_calls >= 1);
+}
+
+test "clean battery and RTC sessions keep time and asynchronous backend polling" {
+    for ([_]u8{ 0x03, 0x10 }) |cartridge_type| {
+        var store = FakeStore{};
+        var time = FakeTime{};
+        var guest = product.Guest.init(std.testing.allocator, store.backend(), time.source(), 1);
+        try guest.openOwned(try makeRom(std.testing.allocator, "SAVE-CLOCK", cartridge_type, 0x02));
+        defer _ = guest.close();
+        const calls_before = time.calls;
+        const polls_before = store.poll_calls;
+        _ = guest.driver().step(product.slice_budget_t_cycles, 0);
+        _ = guest.driver().step(product.slice_budget_t_cycles, std.time.ns_per_ms);
+        try std.testing.expectEqual(calls_before + 2, time.calls);
+        try std.testing.expectEqual(polls_before + 2, store.poll_calls);
+        try std.testing.expectEqual(@as(u32, 0), store.write_calls);
+    }
 }
 
 test "save close failure still releases every resource and remains idempotent" {
