@@ -283,6 +283,7 @@ fn runProduct(app: *r4os.App) i32 {
     const exit_code = runtime.run(&sys, guest.driver(), runtime_host.driver());
     const runtime_state = runtime.state;
     const audio_degraded = runtime.audio.state == .degraded;
+    const audio_last_error = runtime.audio.last_error;
     const runtime_stats = runtime.stats;
     const audio_stats = runtime.audio.stats;
     const apu_stats = guest.machine.?.apu.stats;
@@ -330,6 +331,12 @@ fn runProduct(app: *r4os.App) i32 {
             audio_stats.writes != 0 and audio_stats.write_failures == 0 and audio_stats.late_resyncs == 0 and
             apu_stats.frames_dropped == 0 and
             !audio_degraded and persistence_async_ok and save_files;
+        if (!e2e_ok) {
+            var detail: [256]u8 = undefined;
+            sys.println(std.fmt.bufPrint(&detail, "R4GB E2E detail: exit={d} state={s} audio_error={d} audio_degraded={d} close={d} caller_close={d}", .{
+                exit_code, @tagName(runtime_state), audio_last_error, @intFromBool(audio_degraded), close_result, @intFromBool(sys.programShouldClose()),
+            }) catch "R4GB E2E detail unavailable");
+        }
         if (!writeE2eRuntimeReport(
             &sys,
             e2e_trace,
