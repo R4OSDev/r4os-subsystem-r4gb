@@ -403,7 +403,7 @@ pub const WindowHost = struct {
             .context = self,
             .poll_fn = poll,
             .present_fn = present,
-            .wait_fn = if (self.window.desk.hasFn("desktop_activity_wait")) wait else null,
+            .wait_fn = wait,
             .should_close_fn = shouldClose,
         };
     }
@@ -479,7 +479,7 @@ pub const WindowHost = struct {
     fn wait(context: *anyopaque, timeout_ticks: u64) i32 {
         const self: *WindowHost = @ptrCast(@alignCast(context));
         var sequence = self.activity_sequence;
-        const raw = self.window.desk.desktopActivityWait(self.activity_sequence, timeout_ticks, &sequence);
+        const raw = self.window.desk.guiActivityWait(self.activity_sequence, timeout_ticks, 0, &sequence);
         self.activity_sequence = sequence;
         return raw;
     }
