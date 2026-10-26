@@ -473,7 +473,11 @@ pub const WindowHost = struct {
 
     fn shouldClose(context: *anyopaque) bool {
         const self: *WindowHost = @ptrCast(@alignCast(context));
-        return self.sys.programShouldClose();
+        const closing = self.sys.programShouldClose();
+        // Caller-close can precede its queued GUI Close event. Release held
+        // controls at the same lifecycle boundary on either admission path.
+        if (closing) self.guest.focusLost(self.sys.ticks());
+        return closing;
     }
 
     fn wait(context: *anyopaque, timeout_ticks: u64) i32 {

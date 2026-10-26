@@ -324,7 +324,7 @@ fn runProduct(app: *r4os.App) i32 {
         const focus_ok = e2e_trace.expected_end == .witness or !guest.input.focused;
         const timing_ok = drift_cycles <= product_host.slice_budget_t_cycles + 24 and
             guest.machine == null and ppu_frames + 2 >= guest_cycles / core.clock.frame_t_cycles;
-        const e2e_ok = exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
+        const e2e_ok = runtime.resources_closed and exit_code == 0 and end_ok and close_result == 0 and !guest.resourcesOpen() and
             runtime_stats.slices != 0 and guest.stats.maximum_slice_operations <= product_host.slice_budget_t_cycles + 24 and
             guest.input.input_events >= 2 and focus_ok and published_frames != 0 and timing_ok and
             runtime_stats.dropped_presents == 0 and runtime_stats.poll_budget_exhaustions == 0 and
@@ -358,6 +358,8 @@ fn runProduct(app: *r4os.App) i32 {
             save_store.stats,
             published_frames,
             close_result,
+            runtime.resources_closed and !guest.resourcesOpen(),
+            .{ .exit_code = exit_code, .state = runtime_state, .audio_error = audio_last_error, .close_error = runtime.audio.close_error, .drained = drained, .completion_seen = completion_seen, .focus_ok = focus_ok, .poll_exhaustions = runtime_stats.poll_budget_exhaustions },
         )) return error_e2e_trace;
         if (!e2e_ok) return error_e2e_trace;
     }
@@ -458,6 +460,17 @@ fn writeE2eFailure(
     return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
 }
 
+const E2eRuntimeDetail = struct {
+    exit_code: i32,
+    state: runtime_api.LifecycleState,
+    audio_error: i32,
+    close_error: i32,
+    drained: bool,
+    completion_seen: bool,
+    focus_ok: bool,
+    poll_exhaustions: u64,
+};
+
 fn writeE2eRuntimeReport(
     sys: *const r4os.r4sys.Context,
     trace: E2eTrace,
@@ -479,10 +492,12 @@ fn writeE2eRuntimeReport(
     persistence_stats: persistence_r4os.AsyncStats,
     published_frames: u64,
     close_result: i32,
+    resources_closed: bool,
+    detail: E2eRuntimeDetail,
 ) bool {
     var path_storage: [96]u8 = undefined;
     const path = e2eReportPath(trace, &path_storage) orelse return false;
-    var report_storage: [896]u8 = undefined;
+    var report_storage: [1280]u8 = undefined;
     const extension = if (endsWithIgnoreCase(guest_path, ".gbc")) ".gbc" else ".gb";
     const prefix_len = (std.fmt.bufPrint(
         report_storage[0..],
@@ -518,7 +533,7 @@ fn writeE2eRuntimeReport(
     ) catch return false).len;
     const suffix_len = (std.fmt.bufPrint(
         report_storage[prefix_len..],
-        " save_async_started={d} save_async_completed={d} save_async_coalesced={d} save_async_errors={d} save_async_max_queued={d} pauses={d} resumes={d} resets={d} save_files={d} close={d} resources=closed\r\n",
+        " save_async_started={d} save_async_completed={d} save_async_coalesced={d} save_async_errors={d} save_async_max_queued={d} pauses={d} resumes={d} resets={d} save_files={d} close={d} resources={s}\r\n",
         .{
             persistence_stats.started,
             persistence_stats.completed,
@@ -530,9 +545,15 @@ fn writeE2eRuntimeReport(
             runtime_stats.resets,
             @intFromBool(save_files),
             close_result,
+            if (resources_closed and close_result == 0) "closed" else "pending",
         },
     ) catch return false).len;
-    const report = report_storage[0 .. prefix_len + suffix_len];
+    const detail_len = (std.fmt.bufPrint(
+        report_storage[prefix_len + suffix_len ..],
+        "R4GB E2E detail: exit={d} state={s} audio_error={d} close_error={d} drained={d} completion={d} focus_ok={d} poll_exhaustions={d}\r\n",
+        .{ detail.exit_code, @tagName(detail.state), detail.audio_error, detail.close_error, @intFromBool(detail.drained), @intFromBool(detail.completion_seen), @intFromBool(detail.focus_ok), detail.poll_exhaustions },
+    ) catch return false).len;
+    const report = report_storage[0 .. prefix_len + suffix_len + detail_len];
     return sys.fileWrite(path, report) == @as(i32, @intCast(report.len));
 }
 
