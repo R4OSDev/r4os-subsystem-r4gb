@@ -6,6 +6,12 @@ GUI module `R4GB.R4X`. Game Boy hardware emulation remains entirely inside
 this repository; the R4OS kernel only provides normal program, window, file,
 clock, input, and audio contracts.
 
+R4GB0.10.20 binds SDK0.64.102: active null PCM keeps its stream/timeline;
+only initial discrete silence stays lazy. Explicit pause/stop/reset retains
+the existing owned async Close and real terminal drain. No Game Boy core,
+clock, state or PCM generation change. Qualification and hardware limits:
+workspace Docs/Audio/PlaybackProgress.txt, section0.87.54.
+
 The production model is DMG-CPU C without a bundled Nintendo boot ROM. The
 host establishes a documented post-boot state and starts a cartridge at
 `0x0100`. `.gb` and `.gbc` are discovery candidates for the same format;
