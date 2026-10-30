@@ -6,6 +6,12 @@ GUI module `R4GB.R4X`. Game Boy hardware emulation remains entirely inside
 this repository; the R4OS kernel only provides normal program, window, file,
 clock, input, and audio contracts.
 
+R4GB 0.10.24 uses SDK 0.64.116. The shared runtime evaluates absolute
+guest/audio deadlines after guest, presentation and I/O work, immediately
+before waiting. Newly started retries retain their full interval. Cartridge
+work, PCM generation, pause behavior and owned terminal Close remain unchanged.
+Qualification is recorded in the workspace Audio/README.txt, section 0.88.58.
+
 R4GB0.10.20 binds SDK0.64.102: active null PCM keeps its stream/timeline;
 only initial discrete silence stays lazy. Explicit pause/stop/reset retains
 the existing owned async Close and real terminal drain. No Game Boy core,
