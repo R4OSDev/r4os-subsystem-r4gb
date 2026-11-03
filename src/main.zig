@@ -51,7 +51,9 @@ const runtime_quantum_frames: usize = r4os.subsystem_runtime.default_quantum_fra
 // lossless while still bounding its backlog to substantially less than the
 // 15-second watchdog.
 const apu_selftest_max_catchup_quanta: u16 = 16;
-const audio_service_timeout_ns: u64 = 50 * std.time.ns_per_ms;
+// The same AUDSVC path already requires this finite budget in SNES under
+// SMP4 load. Keep async ownership and fail rather than replay a lost write.
+const audio_service_timeout_ns: u64 = 200 * std.time.ns_per_ms;
 const audio_close_timeout_ns: u64 = 500 * std.time.ns_per_ms;
 const product_audio_target_quanta: u16 = 2;
 // One DMG APU ring holds just over 17 ten-millisecond quanta. Preserve up to
