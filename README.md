@@ -6,7 +6,7 @@ GUI module `R4GB.R4X`. Game Boy hardware emulation remains entirely inside
 this repository; the R4OS kernel only provides normal program, window, file,
 clock, input, and audio contracts.
 
-R4GB 0.10.27 uses SDK 0.64.209 and the generation2 App/Start/Query contracts.
+R4GB 0.10.28 uses SDK 0.64.210 and the generation2 App/Start/Query contracts.
 Native ROM loading uses complete Metadata2 identities and a finite document
 read that must reach EOF with the exact allocated size. Native diagnostic
 switches are parsed separately from the opaque `R4SUBSYS1` record.
