@@ -290,8 +290,12 @@ test "reset rebinds a fresh video generation and preserves flushed battery RAM" 
     const surface = try guest.initialSurface();
     var scratch: [r4os.subsystem_host.tile_max_pixels]u32 = undefined;
     var presenter = try r4os.subsystem_host.Presenter.init(surface, scratch[0..]);
-    try guest.attachVideo(&presenter);
-    const original_generation = guest.video.generation;
+    // This existing case exercises binding/reset, with no native rendering.
+    var draw = r4os.r4draw.Context.fromProgram(.{});
+    var backend = core.host_adapter.copyBackend(&draw);
+    backend.available = true;
+    try guest.attachVideo(&presenter, backend);
+    const original_generation = guest.video.bridge.?.generation;
     const completion = core.runtime_adapter.CompletionWitness{ .address = 0xC001, .value = 0xA5 };
     try guest.setCompletionWitness(completion);
 
@@ -300,15 +304,15 @@ test "reset rebinds a fresh video generation and preserves flushed battery RAM" 
     guest.machine.?.ppu.framebuffer[0] = 3;
     guest.machine.?.apu.beginCapture();
     guest.machine.?.apu.tick(0, 1);
-    guest.video.generation = guest.generation + 1;
+    guest.video.bridge.?.generation = guest.generation + 1;
     const old_pixels = presenter.surface.indexedPixels().?.ptr;
     try std.testing.expectEqual(product.reset_error_video, guest.reset());
     try std.testing.expectEqual(old_pixels, presenter.surface.indexedPixels().?.ptr);
     try std.testing.expectEqual(@as(u8, 3), guest.machine.?.ppu.framebuffer[0]);
     try std.testing.expectEqual(original_generation, guest.generation);
-    guest.video.generation = original_generation;
+    guest.video.bridge.?.generation = original_generation;
     try std.testing.expectEqual(@as(i32, 0), guest.reset());
-    try std.testing.expectEqual(original_generation + 1, guest.video.generation);
+    try std.testing.expectEqual(original_generation + 1, guest.video.bridge.?.generation);
     try std.testing.expectEqual(@as(u8, 0x5A), guest.machine.?.cartridge.external_ram[0]);
     try std.testing.expectEqual(@as(u8, 0), guest.machine.?.ppu.framebuffer[0]);
     try std.testing.expectEqual(@as(usize, 0), guest.machine.?.apu.queuedFrames());

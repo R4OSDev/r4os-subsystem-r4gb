@@ -82,7 +82,8 @@ test "DMG video bridge publishes only native complete frames and bounded raster 
         scratch[0..],
     );
     var adapter: core.host_adapter.VideoAdapter = .{};
-    try adapter.bind(&display, &palette, &presenter, 1);
+    var backend: FakeBackend = .{};
+    try adapter.bind(&display, &palette, &presenter, 1, backend.backend());
 
     try std.testing.expectEqual(@as(u32, 160), presenter.surface.width);
     try std.testing.expectEqual(@as(u32, 144), presenter.surface.height);
@@ -91,8 +92,7 @@ test "DMG video bridge publishes only native complete frames and bounded raster 
     try std.testing.expectEqual(@intFromPtr(&display.framebuffer[0]), @intFromPtr(presenter.surface.indexedPixels().?.ptr));
     try std.testing.expect(@intFromPtr(&display.working_frame[0]) != @intFromPtr(presenter.surface.indexedPixels().?.ptr));
 
-    var backend: FakeBackend = .{};
-    const first = presenter.presentTo(backend.backend(), 320, 288);
+    const first = adapter.presentTo(&presenter, 320, 288);
     switch (first) {
         .presented => |info| try std.testing.expectEqual(host.PresentMode.full, info.mode),
         else => return error.UnexpectedPresentResult,
@@ -100,7 +100,12 @@ test "DMG video bridge publishes only native complete frames and bounded raster 
     try std.testing.expectEqual(@as(?u32, 0x00FF_FFFF), backend.first_color);
     try std.testing.expect(!backend.invalid_raster);
     try std.testing.expect(!adapter.syncVideo(&presenter));
-    try std.testing.expect(presenter.presentTo(backend.backend(), 320, 288) == .unchanged);
+    try std.testing.expect(adapter.presentTo(&presenter, 320, 288) == .unchanged);
+    try std.testing.expectEqual(@as(u64, 0), adapter.bridge.?.active_ticket);
+    try std.testing.expectEqual(@as(usize, 0), adapter.bridge.?.frame.pixels.length);
+    display.working_frame[0] = 3;
+    try std.testing.expect(adapter.presentTo(&presenter, 320, 288) == .unchanged);
+    try std.testing.expectEqual(@as(?u32, 0x00FF_FFFF), backend.first_color);
 
     display.framebuffer[12 * core.ppu.width + 23] = 3;
     display.frame_revision = 1;
@@ -110,7 +115,7 @@ test "DMG video bridge publishes only native complete frames and bounded raster 
     display.damage_min_y = 12;
     display.damage_max_y = 12;
     try std.testing.expect(adapter.syncVideo(&presenter));
-    const damaged = presenter.presentTo(backend.backend(), 320, 288);
+    const damaged = adapter.presentTo(&presenter, 320, 288);
     switch (damaged) {
         .presented => |info| {
             try std.testing.expectEqual(host.PresentMode.damage, info.mode);
@@ -120,7 +125,7 @@ test "DMG video bridge publishes only native complete frames and bounded raster 
     }
     try std.testing.expect(!backend.invalid_raster);
 
-    const resized = presenter.presentTo(backend.backend(), 400, 288);
+    const resized = adapter.presentTo(&presenter, 400, 288);
     switch (resized) {
         .presented => |info| {
             try std.testing.expectEqual(host.PresentMode.full, info.mode);
@@ -143,10 +148,11 @@ test "pause reset LCD shutdown and close cannot expose stale video generations" 
         scratch[0..],
     );
     var adapter: core.host_adapter.VideoAdapter = .{};
-    try adapter.bind(&first_display, &palette, &presenter, 1);
+    var backend: FakeBackend = .{};
+    try adapter.bind(&first_display, &palette, &presenter, 1, backend.backend());
 
     adapter.pause();
-    try std.testing.expectEqual(core.host_adapter.VideoState.paused, adapter.state);
+    try std.testing.expectEqual(r4os.published_frame.paused, adapter.bridge.?.state);
     const lcd_event = first_display.writeLcdc(first_display.lcdc & ~@as(u8, 0x80));
     try std.testing.expect(lcd_event.frame_ready);
     try std.testing.expect(adapter.syncVideo(&presenter));
@@ -154,14 +160,22 @@ test "pause reset LCD shutdown and close cannot expose stale video generations" 
     adapter.resumeRunning();
 
     second_display.framebuffer[0] = 2;
-    try adapter.bind(&second_display, &palette, &presenter, 2);
+    try adapter.bind(&second_display, &palette, &presenter, 2, backend.backend());
     try std.testing.expectEqual(@intFromPtr(&second_display.framebuffer[0]), @intFromPtr(presenter.surface.indexedPixels().?.ptr));
-    try std.testing.expectError(error.StaleGeneration, adapter.bind(&first_display, &palette, &presenter, 1));
+    try std.testing.expectError(error.StaleGeneration, adapter.bind(&first_display, &palette, &presenter, 1, backend.backend()));
 
     adapter.close();
     adapter.close();
-    try std.testing.expectEqual(core.host_adapter.VideoState.closed, adapter.state);
+    try std.testing.expectEqual(r4os.published_frame.ended, adapter.bridge.?.state);
     try std.testing.expect(!adapter.canPresent());
     try std.testing.expect(!adapter.syncVideo(&presenter));
-    try std.testing.expectError(error.Closed, adapter.bind(&first_display, &palette, &presenter, 3));
+    try std.testing.expectError(error.Closed, adapter.bind(&first_display, &palette, &presenter, 3, backend.backend()));
+}
+
+test "native diagnostics do not consume opaque guest paths or arguments" {
+    const launch = core.native_launch;
+    try std.testing.expectEqual(launch.Diagnostic.apu, launch.diagnostic("  /aputest "));
+    try std.testing.expectEqual(launch.Diagnostic.host, launch.diagnostic("/HOSTTEST"));
+    try std.testing.expectEqual(launch.Diagnostic.product, launch.diagnostic("/HOSTTEST trailing"));
+    try std.testing.expectEqual(launch.Diagnostic.product, launch.diagnostic("R4SUBSYS1 /APUTEST /PERSISTTEST /HOSTTEST /SELFTEST"));
 }

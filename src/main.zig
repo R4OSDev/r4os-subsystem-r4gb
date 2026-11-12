@@ -141,15 +141,17 @@ noinline fn executeMachineProbe(machine: *core.machine.Machine) bool {
         first_budget == 0 and second_budget >= 4;
 }
 
-pub fn r4_app_main(app: *r4os.App) i32 {
-    if (std.mem.indexOf(u8, app.args(), "/APUTEST") != null) return apuSelfTest(app);
-    if (std.mem.indexOf(u8, app.args(), "/PERSISTTEST") != null) return persistenceSelfTest(app);
-    if (std.mem.indexOf(u8, app.args(), "/HOSTTEST") != null) return hostSelfTest(app);
-    if (std.ascii.eqlIgnoreCase(app.args(), "/SELFTEST")) return selfTest(app);
-    return runProduct(app);
+pub fn r4_app_main(app: *r4os.App2) i32 {
+    return switch (@import("native_launch.zig").diagnostic(app.args())) {
+        .apu => apuSelfTest(app),
+        .persistence => persistenceSelfTest(app),
+        .host => hostSelfTest(app),
+        .core => selfTest(app),
+        .product => runProduct(app),
+    };
 }
 
-fn runProduct(app: *r4os.App) i32 {
+fn runProduct(app: *r4os.App2) i32 {
     if (app.profile != .desktop) return error_profile;
     const sys = app.system();
     const allocator = app.allocator() orelse return error_allocator;
@@ -232,7 +234,7 @@ fn runProduct(app: *r4os.App) i32 {
     };
     window.setInputPolicy(.{ .key_text_mode = .key_and_text, .pointer_mode = .ignored });
     _ = window.setMinimumSize(@intCast(core.ppu.width), @intCast(core.ppu.height));
-    guest.attachVideo(&window.video) catch |fault| {
+    guest.attachVideo(&window.video, core.host_adapter.copyBackend(&window.draw)) catch |fault| {
         _ = guest.close();
         return showStatus(allocator, sys, desk, draw, "R4GB - Hostfehler", &.{
             "Die Cartridge-Surface konnte nicht an das Fenster gebunden werden.",
@@ -567,19 +569,21 @@ fn persistenceFilesPresent(
 ) bool {
     if (ram_bytes != 0) {
         const path = persistence_r4os.dataPath(digest, .sram) catch return false;
-        const info = switch (files.info(path.asZ())) {
-            .value => |value| value,
+        const info = switch (files.metadata(path.asZ())) {
+            .found => |value| value,
             .missing, .failure => return false,
         };
-        if (info.is_dir != 0 or info.size != ram_bytes) return false;
+        if (info.flags & r4os.abi.file_metadata2_flag_directory != 0 or
+            info.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0 or info.byte_size != ram_bytes) return false;
     }
     if (has_rtc) {
         const path = persistence_r4os.dataPath(digest, .rtc) catch return false;
-        const info = switch (files.info(path.asZ())) {
-            .value => |value| value,
+        const info = switch (files.metadata(path.asZ())) {
+            .found => |value| value,
             .missing, .failure => return false,
         };
-        if (info.is_dir != 0 or info.size != core.persistence.rtc_record_bytes) return false;
+        if (info.flags & r4os.abi.file_metadata2_flag_directory != 0 or
+            info.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0 or info.byte_size != core.persistence.rtc_record_bytes) return false;
     }
     return true;
 }
@@ -599,7 +603,7 @@ const ProductTimeContext = struct {
         const self: *ProductTimeContext = @ptrCast(@alignCast(context));
         return .{
             .wall_seconds = persistence_r4os.wallSeconds(self.sys.timeState()),
-            .monotonic_ns = self.sys.monotonicNanoseconds() orelse 0,
+            .monotonic_ns = if (self.sys.base.clockSampleChecked()) |sample| sample.instant_ns else |_| 0,
         };
     }
 };
@@ -619,26 +623,24 @@ fn loadRomOwned(
     files: *const r4os.app_storage.Files,
     path: *r4os.AbsoluteFilePath,
 ) LoadError![]u8 {
-    const info = switch (files.info(path.asZ())) {
-        .value => |value| value,
+    const info = switch (files.metadata(path.asZ())) {
+        .found => |value| value,
         .missing => return error.Missing,
         .failure => return error.Metadata,
     };
-    if (info.is_dir != 0) return error.Directory;
-    const size = std.math.cast(usize, info.size) orelse return error.TooLarge;
+    if (info.flags & r4os.abi.file_metadata2_flag_directory != 0) return error.Directory;
+    if (info.flags & r4os.abi.file_metadata2_flag_byte_size_valid == 0) return error.Metadata;
+    const size = std.math.cast(usize, info.byte_size) orelse return error.TooLarge;
     if (size < core.cartridge.header_size) return error.TooSmall;
     if (size > core.cartridge.max_rom_bytes) return error.TooLarge;
     const image = allocator.alloc(u8, size) catch return error.OutOfMemory;
     errdefer allocator.free(image);
-    var offset: usize = 0;
-    while (offset < image.len) {
-        const transferred = switch (files.readAt(path.asZ(), @intCast(offset), image[offset..])) {
-            .bytes => |count| count,
-            .end, .failure => return error.Read,
-        };
-        if (transferred == 0 or transferred > image.len - offset) return error.Read;
-        offset += transferred;
-    }
+    const loaded = switch (files.readDocumentPrefix(path.asZ(), image,
+        r4os.time_contract.timeoutFinite(.{ .nanoseconds = 5 * std.time.ns_per_s }))) {
+        .value => |value| value,
+        .failure => return error.Read,
+    };
+    if (loaded.bytes != image.len or loaded.file_size != image.len) return error.Read;
     return image;
 }
 
@@ -893,7 +895,7 @@ const HostSelfTestDriver = struct {
     }
 };
 
-fn hostSelfTest(app: *r4os.App) i32 {
+fn hostSelfTest(app: *r4os.App2) i32 {
     const sys = app.system();
     const allocator = app.allocator() orelse return error_allocator;
     const files = app.files() orelse return r4os.abi.err_no_group;
@@ -929,7 +931,7 @@ fn hostSelfTest(app: *r4os.App) i32 {
     };
     window.setInputPolicy(.{ .key_text_mode = .key_and_text, .pointer_mode = .ignored });
     _ = window.setMinimumSize(@intCast(core.ppu.width), @intCast(core.ppu.height));
-    guest.attachVideo(&window.video) catch {
+    guest.attachVideo(&window.video, core.host_adapter.copyBackend(&window.draw)) catch {
         sys.println("R4GB host runtime: FAILED video-bind");
         return error_host_selftest;
     };
@@ -1024,7 +1026,7 @@ fn writeE2eFixtureFiles(sys: *const r4os.r4sys.Context, allocator: std.mem.Alloc
     return true;
 }
 
-fn persistenceSelfTest(app: *r4os.App) i32 {
+fn persistenceSelfTest(app: *r4os.App2) i32 {
     runPersistenceSelfTest(app) catch |fault| {
         const sys = app.system();
         sys.write("R4GB persistence runtime: FAILED ");
@@ -1035,7 +1037,7 @@ fn persistenceSelfTest(app: *r4os.App) i32 {
     return 0;
 }
 
-fn runPersistenceSelfTest(app: *r4os.App) !void {
+fn runPersistenceSelfTest(app: *r4os.App2) !void {
     const allocator = app.allocator() orelse return error.AllocatorUnavailable;
     const files = app.files() orelse return error.FilesUnavailable;
     const sys = app.system();
@@ -1053,7 +1055,7 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
     defer first_store.removeTestFiles(&first_cart.rom_digest);
     const generation = (sys.ticks() | 1) +| 2;
     const wall = persistence_r4os.wallSeconds(sys.timeState());
-    const monotonic = sys.monotonicNanoseconds() orelse 0;
+    const monotonic = (try sys.base.clockSampleChecked()).instant_ns;
     var first_session = try core.persistence.Session.open(&first_cart, first_store.backend(), generation, wall, monotonic);
     defer if (!first_session.closed) {
         first_session.close(&first_cart, generation, wall, monotonic) catch {};
@@ -1182,7 +1184,7 @@ fn runPersistenceSelfTest(app: *r4os.App) !void {
         return error.PartialRecoveryWasNotPreserved;
 }
 
-fn apuSelfTest(app: *r4os.App) i32 {
+fn apuSelfTest(app: *r4os.App2) i32 {
     const sys = app.system();
     const allocator = app.allocator() orelse return error_allocator;
     const app_audio = app.audio() orelse {
@@ -1318,7 +1320,7 @@ fn finalizeSelfTestRom(bytes: []u8) void {
     bytes[0x14F] = @truncate(checksum);
 }
 
-fn selfTest(app: *r4os.App) i32 {
+fn selfTest(app: *r4os.App2) i32 {
     const sys = app.system();
     const allocator = app.allocator() orelse return error_allocator;
     const bytes = allocator.alloc(u8, 32 * 1024) catch return error_allocator;

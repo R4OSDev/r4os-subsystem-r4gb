@@ -6,7 +6,18 @@ GUI module `R4GB.R4X`. Game Boy hardware emulation remains entirely inside
 this repository; the R4OS kernel only provides normal program, window, file,
 clock, input, and audio contracts.
 
-R4GB 0.10.24 uses SDK 0.64.116. The shared runtime evaluates absolute
+R4GB 0.10.27 uses SDK 0.64.209 and the generation2 App/Start/Query contracts.
+Native ROM loading uses complete Metadata2 identities and a finite document
+read that must reach EOF with the exact allocated size. Native diagnostic
+switches are parsed separately from the opaque `R4SUBSYS1` record.
+The shared PublishedFrameBridge presents only the complete PPU framebuffer;
+its source and palette loans end after each synchronous copy presentation.
+The mutable working raster is never published. Reset stages a new binding
+generation before replacing the old machine, and close detaches every view
+before releasing the ROM and mutable state. The existing async audio request,
+virtual guest clock and joined persistence worker retain their own lifetimes.
+
+Historical 0.10.24 used SDK 0.64.116. The shared runtime evaluates absolute
 guest/audio deadlines after guest, presentation and I/O work, immediately
 before waiting. Newly started retries retain their full interval. Cartridge
 work, PCM generation, pause behavior and owned terminal Close remain unchanged.
@@ -109,7 +120,8 @@ recovery.
 The productive `R4SUBSYS1` path now opens each accepted cartridge as a private
 GUI instance. It runs one 32,768-T-cycle-bounded guest slice per common runtime
 cycle, publishes the native 160x144 Indexed8 surface through
-`r4os.subsystem_host`, and sends PCM only through App-Audio. Resize and
+`r4os.published_frame` and its synchronous copy presenter, and sends PCM only
+through the existing owned async App-Audio path. Resize and
 maximize preserve aspect ratio and letterboxing; unchanged frames are not
 republished. Focus loss releases every held guest button. F5 pauses, F6
 resumes, F8 creates a fresh machine generation, F9 mutes, and F10 unmutes.
